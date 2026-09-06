@@ -54,7 +54,10 @@ import { SettingsPanel } from '../popup/SettingsPanel';
 import { useEventFeed } from '../popup/use-event-feed';
 import { PipelineDiagnostics } from './PipelineDiagnostics';
 import { SupportPanel } from './SupportPanel';
-import { createSurfaceSwitchClient } from './surface-switch-client';
+import {
+  createSurfaceSwitchClient,
+  type SurfaceSwitchClient,
+} from './surface-switch-client';
 import { useSurfaceReady } from './use-surface-ready';
 import {
   FILTERABLE_CHAINS,
@@ -157,6 +160,7 @@ export interface SidePanelDependencies {
 
 export interface SidePanelAppProps {
   deps: SidePanelDependencies;
+  surfaceSwitchClient?: SurfaceSwitchClient;
   /** Reports the installed initial feed snapshot exactly once per mount. */
   onFeedReady?: (eventWatermark: number) => void;
 }
@@ -179,8 +183,8 @@ export function SidePanelApp(props: SidePanelAppProps) {
     [deps.preferences, deps.storage.local],
   );
   const surfaceSwitchClient = useMemo(
-    () => createSurfaceSwitchClient(runtime, now),
-    [now, runtime],
+    () => props.surfaceSwitchClient ?? createSurfaceSwitchClient(runtime, now),
+    [now, props.surfaceSwitchClient, runtime],
   );
   const [surfaceSwitchState, setSurfaceSwitchState] = useState<
     'idle' | 'switching' | 'error'
@@ -647,6 +651,7 @@ export function SidePanelApp(props: SidePanelAppProps) {
     surface: surfaceKey,
     eventWatermark,
     now,
+    client: surfaceSwitchClient,
   });
 
   const upsertAnnotation = useCallback(

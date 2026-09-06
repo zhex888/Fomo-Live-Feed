@@ -540,6 +540,8 @@ describe('FloatingSurfaceHost', () => {
         sourceWindowId: 17,
         phase: 'awaiting-ready',
         startedAt: 1_800_000_000_000,
+        sourceIdentity: { hostWindowId: 17, instanceToken: 'source-panel' },
+        targetIdentity: { hostWindowId: 141, instanceToken: 'target-float' },
       },
     });
     harness.setResponse('surface.ready', { ok: true, switchId: 'unsupported-ready' });
@@ -553,6 +555,8 @@ describe('FloatingSurfaceHost', () => {
         switchId: 'unsupported-ready',
         surface: 'floating',
         eventWatermark: 0,
+        windowId: 141,
+        instanceToken: expect.any(String),
       },
     }));
     fireEvent.click(screen.getByRole('button', { name: 'Return to Side Panel' }));
@@ -579,6 +583,8 @@ describe('FloatingSurfaceHost', () => {
       sourceWindowId: 18,
       phase: 'awaiting-ready',
       startedAt: 1_800_000_000_000,
+      sourceIdentity: { hostWindowId: 18, instanceToken: 'source-panel' },
+      targetIdentity: { hostWindowId: 142, instanceToken: 'target-float' },
     };
     let bootstrapCalls = 0;
     let readyCalls = 0;

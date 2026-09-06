@@ -31,6 +31,7 @@ export const FLOAT_GEOMETRY_STORAGE_KEY = 'floatWindow.geometry.v1';
 export const FLOAT_WINDOW_ID_SESSION_KEY = 'floatWindow.windowId';
 export const FLOAT_OWNER_WINDOW_ID_SESSION_KEY = 'floatWindow.ownerWindowId';
 export const PIP_SESSION_STORAGE_KEY = 'floatWindow.pipSession.v1';
+export const FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY = 'floatWindow.instanceToken.v1';
 
 export interface PipSessionState {
   sessionId: string;
@@ -186,9 +187,11 @@ export function parseFloatGeometry(value: unknown): FloatWindowGeometry {
  */
 export class FloatWindowManager {
   private openRequest: Promise<OpenFloatWindowResult> | undefined;
+  private hostWindowIdCache: number | undefined;
   private ownerWindowIdCache: number | undefined;
   private pipSessionCache: PipSessionState | undefined;
   private pipSessionCacheConfirmed = false;
+  private surfaceInstanceTokenCache: string | undefined;
   private lifecycleMutationQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -202,13 +205,13 @@ export class FloatWindowManager {
    * call, so a window the user closed (or a stale id from a dead worker) is
    * never focused blindly.
    */
-  openOrFocus(ownerWindowId?: number): Promise<OpenFloatWindowResult> {
+  openOrFocus(ownerWindowId?: number, instanceToken?: string): Promise<OpenFloatWindowResult> {
     if (this.openRequest !== undefined) {
       return this.openRequest;
     }
 
     const request = this.runLifecycleMutation(
-      () => this.openOrFocusWithOwnerOnce(ownerWindowId),
+      () => this.openOrFocusWithOwnerOnce(ownerWindowId, instanceToken),
     );
     this.openRequest = request;
     void request.then(() => {
@@ -225,13 +228,53 @@ export class FloatWindowManager {
 
   private async openOrFocusWithOwnerOnce(
     ownerWindowId: number | undefined,
+    instanceToken: string | undefined,
   ): Promise<OpenFloatWindowResult> {
     const nextOwnerWindowId = ownerWindowId !== undefined
       && Number.isInteger(ownerWindowId)
       && ownerWindowId >= 0
       ? ownerWindowId
       : undefined;
-    return this.openOrFocusOnce(nextOwnerWindowId);
+    return this.openOrFocusOnce(nextOwnerWindowId, instanceToken);
+  }
+
+  cachedSurfaceInstanceMatches(hostWindowId: number, instanceToken: string): boolean {
+    return this.surfaceInstanceTokenCache === instanceToken
+      && this.hostWindowIdCache === hostWindowId;
+  }
+
+  async surfaceInstanceMatches(hostWindowId: number, instanceToken: string): Promise<boolean> {
+    try {
+      const stored = await this.storage.session.get([
+        FLOAT_WINDOW_ID_SESSION_KEY,
+        FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY,
+      ]);
+      const matches = stored[FLOAT_WINDOW_ID_SESSION_KEY] === hostWindowId
+        && stored[FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY] === instanceToken;
+      if (matches) {
+        this.hostWindowIdCache = hostWindowId;
+        this.surfaceInstanceTokenCache = instanceToken;
+      }
+      return matches;
+    } catch {
+      return false;
+    }
+  }
+
+  cachedSurfaceInstanceTokenMatches(instanceToken: string): boolean {
+    return this.surfaceInstanceTokenCache === instanceToken;
+  }
+
+  async registerSurfaceInstance(hostWindowId: number, instanceToken: string): Promise<boolean> {
+    return this.runLifecycleMutation(async () => {
+      const existingId = await this.readSessionWindowId();
+      if (existingId !== hostWindowId || instanceToken.length === 0) return false;
+      await this.storage.session.set({
+        [FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY]: instanceToken,
+      });
+      this.surfaceInstanceTokenCache = instanceToken;
+      return true;
+    });
   }
 
   async ownerWindowId(): Promise<number | undefined> {
@@ -537,33 +580,50 @@ export class FloatWindowManager {
   }
 
   /** Close only the floating host created by the durable switch transaction. */
-  async closeExpectedWindow(hostWindowId: number): Promise<boolean> {
+  async closeExpectedWindow(hostWindowId: number | undefined, instanceToken: string): Promise<boolean> {
     this.openRequest = undefined;
-    return this.runLifecycleMutation(() => this.closeOnce({ hostWindowId }));
+    return this.runLifecycleMutation(() => this.closeOnce({
+      ...(hostWindowId === undefined ? {} : { hostWindowId }),
+      instanceToken,
+    }));
   }
 
   private async closeOnce(
-    expected?: { hostWindowId: number; sessionId?: string },
+    expected?: { hostWindowId?: number; sessionId?: string; instanceToken?: string },
   ): Promise<boolean> {
     let existingId: number | undefined;
     let pipSession: PipSessionState | undefined;
+    let surfaceInstanceToken: string | undefined;
     try {
       const stored = await this.storage.session.get([
         FLOAT_WINDOW_ID_SESSION_KEY,
         FLOAT_OWNER_WINDOW_ID_SESSION_KEY,
         PIP_SESSION_STORAGE_KEY,
+        FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY,
       ]);
       const value = stored[FLOAT_WINDOW_ID_SESSION_KEY];
       existingId = typeof value === 'number' && Number.isInteger(value) && value >= 0
         ? value
         : undefined;
       pipSession = parsePipSession(stored[PIP_SESSION_STORAGE_KEY]);
+      const rawSurfaceInstanceToken = stored[FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY];
+      surfaceInstanceToken = typeof rawSurfaceInstanceToken === 'string'
+        ? rawSurfaceInstanceToken
+        : undefined;
     } catch {
       return false;
     }
 
     if (expected !== undefined) {
-      if (existingId === undefined || existingId !== expected.hostWindowId) return true;
+      if (
+        existingId === undefined
+        || (expected.hostWindowId !== undefined && existingId !== expected.hostWindowId)
+      ) return true;
+      if (expected.instanceToken !== undefined) {
+        if (surfaceInstanceToken !== expected.instanceToken) {
+          return surfaceInstanceToken === undefined ? false : true;
+        }
+      }
       if (expected.sessionId !== undefined && (
         pipSession !== undefined
         && (
@@ -592,6 +652,8 @@ export class FloatWindowManager {
     }
 
     this.ownerWindowIdCache = undefined;
+    this.hostWindowIdCache = undefined;
+    this.surfaceInstanceTokenCache = undefined;
     this.pipSessionCache = undefined;
     this.pipSessionCacheConfirmed = false;
 
@@ -600,6 +662,7 @@ export class FloatWindowManager {
         [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
         [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: -1,
         [PIP_SESSION_STORAGE_KEY]: -1,
+        [FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY]: -1,
       });
     } catch {
       // The host is already confirmed absent. Session keys are recoverable
@@ -612,6 +675,7 @@ export class FloatWindowManager {
 
   private async openOrFocusOnce(
     nextOwnerWindowId: number | undefined,
+    instanceToken: string | undefined,
   ): Promise<OpenFloatWindowResult> {
     const existingId = await this.readSessionWindowId();
 
@@ -619,6 +683,13 @@ export class FloatWindowManager {
       try {
         const snapshot = await this.chrome.windows.get(existingId);
         if (snapshot.id !== undefined) {
+          this.hostWindowIdCache = existingId;
+          if (instanceToken !== undefined) {
+            await this.storage.session.set({
+              [FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY]: instanceToken,
+            });
+            this.surfaceInstanceTokenCache = instanceToken;
+          }
           try {
             await this.ownerWindowId();
           } catch {
@@ -660,7 +731,7 @@ export class FloatWindowManager {
       });
 
       if (created.id !== undefined) {
-        await this.writeSessionWindowId(created.id);
+        await this.writeSessionWindowId(created.id, instanceToken);
         return { ok: true, windowId: created.id, created: true };
       }
 
@@ -689,7 +760,10 @@ export class FloatWindowManager {
         await this.storage.session.set({
           [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
           [PIP_SESSION_STORAGE_KEY]: -1,
+          [FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY]: -1,
         });
+        this.hostWindowIdCache = undefined;
+        this.surfaceInstanceTokenCache = undefined;
         this.pipSessionCache = undefined;
         this.pipSessionCacheConfirmed = false;
       } catch {
@@ -725,15 +799,25 @@ export class FloatWindowManager {
       const stored = await this.storage.session.get([FLOAT_WINDOW_ID_SESSION_KEY]);
       const value = stored[FLOAT_WINDOW_ID_SESSION_KEY];
       return typeof value === 'number' && Number.isInteger(value) && value >= 0
-        ? value
-        : undefined;
+        ? (this.hostWindowIdCache = value)
+        : (this.hostWindowIdCache = undefined);
     } catch {
       return undefined;
     }
   }
 
-  private async writeSessionWindowId(windowId: number): Promise<void> {
-    await this.storage.session.set({ [FLOAT_WINDOW_ID_SESSION_KEY]: windowId });
+  private async writeSessionWindowId(
+    windowId: number,
+    instanceToken?: string,
+  ): Promise<void> {
+    await this.storage.session.set({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: windowId,
+      ...(instanceToken === undefined
+        ? { [FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY]: -1 }
+        : { [FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY]: instanceToken }),
+    });
+    this.hostWindowIdCache = windowId;
+    this.surfaceInstanceTokenCache = instanceToken;
     this.pipSessionCache = undefined;
     this.pipSessionCacheConfirmed = false;
   }
@@ -742,7 +826,10 @@ export class FloatWindowManager {
     await this.storage.session.set({
       [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
       [PIP_SESSION_STORAGE_KEY]: -1,
+      [FLOAT_WINDOW_INSTANCE_TOKEN_SESSION_KEY]: -1,
     });
+    this.hostWindowIdCache = undefined;
+    this.surfaceInstanceTokenCache = undefined;
     this.pipSessionCache = undefined;
     this.pipSessionCacheConfirmed = false;
   }

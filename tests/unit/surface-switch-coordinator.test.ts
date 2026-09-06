@@ -120,7 +120,7 @@ describe('SurfaceSwitchCoordinator', () => {
     const { coordinator, operations } = createHarness();
     const pending = coordinator.request(toFloating);
     await vi.waitFor(() => expect(operations.openFloating).toHaveBeenCalledOnce());
-    expect(operations.openFloating).toHaveBeenCalledWith(7);
+    expect(operations.openFloating).toHaveBeenCalledWith(7, 'switch-1');
     await vi.waitFor(async () => expect(await coordinator.bootstrap('floating')).toMatchObject({
       phase: 'awaiting-ready',
     }));
@@ -132,7 +132,7 @@ describe('SurfaceSwitchCoordinator', () => {
       eventWatermark: 12,
     })).resolves.toEqual({ ok: true, switchId: 'switch-1' });
     await expect(pending).resolves.toEqual({ ok: true, switchId: 'switch-1' });
-    expect(operations.closeSidePanel).toHaveBeenCalledWith(7);
+    expect(operations.closeSidePanel).toHaveBeenCalledWith(7, undefined);
     expect(operations.saveDisplayMode).toHaveBeenCalledWith('floating');
   });
 
@@ -416,7 +416,10 @@ describe('SurfaceSwitchCoordinator', () => {
     openResult.resolve(true);
     for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
 
-    expect(operations.closeSidePanel).toHaveBeenCalledWith(9);
+    expect(operations.closeSidePanel).toHaveBeenCalledWith(9, {
+      hostWindowId: 9,
+      instanceToken: 'late-opened-target',
+    });
     expect(operations.closeFloating).not.toHaveBeenCalled();
     await expect(pending).resolves.toEqual({
       ok: false,
@@ -632,7 +635,10 @@ describe('SurfaceSwitchCoordinator', () => {
       switchId: 'delayed-persist',
       reason: 'target-ready-timeout',
     });
-    expect(operations.closeSidePanel).toHaveBeenCalledWith(9);
+    expect(operations.closeSidePanel).toHaveBeenCalledWith(9, {
+      hostWindowId: 9,
+      instanceToken: 'delayed-persist',
+    });
     expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
 
     const retry = coordinator.request({
@@ -1075,6 +1081,8 @@ describe('SurfaceSwitchCoordinator', () => {
       ...toFloating,
       phase: 'awaiting-ready',
       startedAt: 900,
+      sourceIdentity: { hostWindowId: 7, instanceToken: 'source-panel' },
+      targetIdentity: { instanceToken: 'switch-1' },
     });
 
     await expect(coordinator.restore()).resolves.toMatchObject({
@@ -1094,6 +1102,7 @@ describe('SurfaceSwitchCoordinator', () => {
       sourceWindowId: 9,
       phase: 'closing-target',
       startedAt: 0,
+      targetIdentity: { hostWindowId: 9, instanceToken: 'target-panel' },
     });
     const operations: SurfaceOperations = {
       openFloating: vi.fn(async () => true),
@@ -1120,7 +1129,10 @@ describe('SurfaceSwitchCoordinator', () => {
       sourceWindowId: 9,
     })).resolves.toMatchObject({ reason: 'switch-in-progress' });
     await expect(coordinator.bootstrap('sidepanel')).resolves.toBeUndefined();
-    expect(operations.closeSidePanel).toHaveBeenCalledWith(9);
+    expect(operations.closeSidePanel).toHaveBeenCalledWith(9, {
+      hostWindowId: 9,
+      instanceToken: 'target-panel',
+    });
     expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
   });
 
@@ -1135,6 +1147,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { hostWindowId: 9, instanceToken: 'target-panel' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -1197,6 +1210,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { hostWindowId: 9, instanceToken: 'target-panel' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -1253,6 +1267,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { hostWindowId: 9, instanceToken: 'target-panel' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -1310,6 +1325,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { hostWindowId: 9, instanceToken: 'target-panel' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -1392,6 +1408,7 @@ describe('SurfaceSwitchCoordinator', () => {
       sourceWindowId: 9,
       phase: 'closing-target',
       startedAt: 0,
+      targetIdentity: { hostWindowId: 9, instanceToken: 'older-panel' },
     });
     const operations: SurfaceOperations = {
       openFloating: vi.fn(async () => true),
@@ -1444,6 +1461,7 @@ describe('SurfaceSwitchCoordinator', () => {
       sourceWindowId: 9,
       phase: 'closing-target',
       startedAt: 0,
+      targetIdentity: { instanceToken: 'older-float' },
     });
     const operations: SurfaceOperations = {
       openFloating: vi.fn(async () => true),
@@ -1496,6 +1514,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { instanceToken: 'older-float-released' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -1608,6 +1627,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { instanceToken: 'main-float' },
       });
       storage.values.set(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY, {
         switchId: 'detached-cleanup',
@@ -1616,6 +1636,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { hostWindowId: 9, instanceToken: 'detached-panel' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -1666,6 +1687,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { hostWindowId: 9, instanceToken: 'same-target-old' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -1878,6 +1900,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { hostWindowId: 9, instanceToken: 'durable-detached' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -1967,6 +1990,7 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'closing-target',
         startedAt: 0,
+        targetIdentity: { hostWindowId: 9, instanceToken: 'restart-clear-only' },
       });
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
@@ -2095,6 +2119,8 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceWindowId: 9,
         phase: 'awaiting-ready' as const,
         startedAt: 900,
+        sourceIdentity: { hostWindowId: 9, sessionId: 'source-pip' },
+        targetIdentity: { hostWindowId: 9, instanceToken: 'main-panel' },
       };
       storage.values.set(SURFACE_SWITCH_STORAGE_KEY, main);
       storage.values.set(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY, {
@@ -2370,7 +2396,7 @@ describe('SurfaceSwitchCoordinator', () => {
       ...toFloating,
       phase: 'closing-target',
       startedAt: 900,
-      targetIdentity: { hostWindowId: 500 },
+      targetIdentity: { hostWindowId: 500, instanceToken: 'old-float' },
     });
     let liveFloatingHost = 501;
     const removedHosts: number[] = [];
@@ -2390,10 +2416,78 @@ describe('SurfaceSwitchCoordinator', () => {
 
     await coordinator.restore();
     await expect(coordinator.bootstrap('floating')).resolves.toBeUndefined();
-    expect(operations.closeFloating).toHaveBeenCalledWith({ hostWindowId: 500 });
+    expect(operations.closeFloating).toHaveBeenCalledWith({
+      hostWindowId: 500,
+      instanceToken: 'old-float',
+    });
     expect(removedHosts).toEqual([]);
     expect(liveFloatingHost).toBe(501);
     expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+  });
+
+  it('clears an identityless floating cleanup record without destructive replay', async () => {
+    const { coordinator, operations, storage } = createHarness();
+    storage.values.set(SURFACE_SWITCH_STORAGE_KEY, {
+      ...toFloating,
+      phase: 'closing-target',
+      startedAt: 900,
+    });
+
+    await coordinator.restore();
+    await expect(coordinator.bootstrap('floating')).resolves.toBeUndefined();
+    expect(operations.closeFloating).not.toHaveBeenCalled();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+  });
+
+  it('reconciles a restored floating open by its durable target generation', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new MemoryStorage();
+      storage.values.set(SURFACE_SWITCH_STORAGE_KEY, {
+        ...toFloating,
+        phase: 'opening',
+        startedAt: 900,
+        sourceIdentity: { hostWindowId: 7, instanceToken: 'source-panel' },
+        targetIdentity: { instanceToken: 'opening-float' },
+      });
+      const operations: SurfaceOperations = {
+        openFloating: vi.fn(async () => true),
+        openSidePanel: vi.fn(async () => true),
+        closeFloating: vi.fn(async () => true),
+        closeSidePanel: vi.fn(async () => true),
+        saveDisplayMode: vi.fn(async () => {}),
+      };
+      const coordinator = new SurfaceSwitchCoordinator({
+        operations,
+        storage,
+        now: () => 1_000,
+        targetCloseRetryDelayMs: 20,
+        targetCloseRetryLimit: 1,
+      });
+
+      await coordinator.restore();
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(operations.closeFloating).toHaveBeenCalledWith({
+        instanceToken: 'opening-float',
+      });
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('persists floating target generation before its host open settles', async () => {
+    const open = deferred<boolean>();
+    const { coordinator, operations, storage } = createHarness();
+    vi.mocked(operations.openFloating).mockImplementationOnce(() => open.promise);
+
+    void coordinator.request(toFloating);
+    await vi.waitFor(() => expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      phase: 'opening',
+      targetIdentity: { instanceToken: 'switch-1' },
+    }));
+    open.resolve(false);
   });
 
   it('persists closing-target before rollback close and resumes that phase after marker failure', async () => {

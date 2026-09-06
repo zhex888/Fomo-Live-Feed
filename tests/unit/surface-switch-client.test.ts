@@ -86,8 +86,13 @@ describe('createSurfaceSwitchClient', () => {
 
     await client.switchTo('sidepanel', 'floating', 7);
     await client.bootstrap('floating', 8);
-    await client.ready('switch-1', 'floating', 12);
+    await client.ready('switch-1', 'floating', 12, 8);
 
+    const instanceToken = (vi.mocked(sendMessage).mock.calls[0]![0] as {
+      payload: { instanceToken: string };
+    }).payload.instanceToken;
+    expect(instanceToken.length).toBeGreaterThan(0);
+    expect(instanceToken.length).toBeLessThanOrEqual(128);
     expect(sendMessage).toHaveBeenNthCalledWith(1, expect.objectContaining({
       protocolVersion: 1,
       type: 'surface.switch.request',
@@ -96,17 +101,21 @@ describe('createSurfaceSwitchClient', () => {
         source: 'sidepanel',
         target: 'floating',
         sourceWindowId: 7,
+        instanceToken,
       }),
     }));
     expect(sendMessage).toHaveBeenNthCalledWith(2, {
       protocolVersion: 1,
       type: 'surface.bootstrap',
-      payload: { surface: 'floating', windowId: 8 },
+      payload: { surface: 'floating', windowId: 8, instanceToken },
     });
     expect(sendMessage).toHaveBeenNthCalledWith(3, {
       protocolVersion: 1,
       type: 'surface.ready',
-      payload: { switchId: 'switch-1', surface: 'floating', eventWatermark: 12 },
+      payload: {
+        switchId: 'switch-1', surface: 'floating', eventWatermark: 12,
+        windowId: 8, instanceToken,
+      },
     });
   });
 
@@ -120,7 +129,7 @@ describe('createSurfaceSwitchClient', () => {
       onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
     });
 
-    await expect(client.ready('switch-1', 'floating', 12))
+    await expect(client.ready('switch-1', 'floating', 12, 8))
       .rejects.toThrow('Invalid surface.ready response');
   });
 
@@ -130,7 +139,7 @@ describe('createSurfaceSwitchClient', () => {
       onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
     });
 
-    await expect(client.ready('switch-1', 'floating', 12))
+    await expect(client.ready('switch-1', 'floating', 12, 8))
       .rejects.toThrow('Invalid surface.ready response');
   });
 
@@ -144,7 +153,7 @@ describe('createSurfaceSwitchClient', () => {
       onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
     });
 
-    await expect(client.ready('switch-1', 'floating', 12)).resolves.toEqual({
+    await expect(client.ready('switch-1', 'floating', 12, 8)).resolves.toEqual({
       ok: false,
       switchId: 'switch-1',
       reason: 'target-close-failed',
@@ -162,6 +171,7 @@ describe('createSurfaceSwitchClient', () => {
           sourceWindowId: 7,
           phase: 'closing-target',
           startedAt: 900,
+          targetIdentity: { hostWindowId: 7, instanceToken: 'panel-1' },
         },
       })),
       onMessage: { addListener: vi.fn(), removeListener: vi.fn() },

@@ -383,6 +383,28 @@ describe('FloatWindowManager.openOrFocus', () => {
 });
 
 describe('FloatWindowManager.close', () => {
+  it('persists and guards the floating host generation used by a switch', async () => {
+    const harness = createHarness();
+    const generationManager = harness.manager as FloatWindowManager & {
+      openOrFocus(ownerWindowId: number, instanceToken: string): Promise<{
+        ok: true;
+        windowId: number;
+      }>;
+      closeExpectedWindow(hostWindowId: number, instanceToken: string): Promise<boolean>;
+    };
+    const opened = await generationManager.openOrFocus(77, 'switch-original');
+    if (!opened.ok) throw new Error('expected generated open');
+    expect(harness.session.snapshot()['floatWindow.instanceToken.v1']).toBe('switch-original');
+    harness.session.seed({ 'floatWindow.instanceToken.v1': 'switch-replacement' });
+
+    await expect(generationManager.closeExpectedWindow(
+      opened.windowId,
+      'switch-original',
+    )).resolves.toBe(true);
+    expect(harness.liveWindows.has(opened.windowId)).toBe(true);
+    expect(harness.removeCalls).toEqual([]);
+  });
+
   it('does not close a replacement PiP host when reconciling an older session', async () => {
     const harness = createHarness();
     const original = await harness.manager.openOrFocus(77);
@@ -416,13 +438,16 @@ describe('FloatWindowManager.close', () => {
 
   it('does not close a replacement floating host when reconciling an older target', async () => {
     const harness = createHarness();
-    const original = await harness.manager.openOrFocus(77);
+    const original = await harness.manager.openOrFocus(77, 'target-original');
     if (!original.ok) throw new Error('expected original open');
     await harness.manager.close();
     const replacement = await harness.manager.openOrFocus(88);
     if (!replacement.ok) throw new Error('expected replacement open');
 
-    await expect(harness.manager.closeExpectedWindow(original.windowId)).resolves.toBe(true);
+    await expect(harness.manager.closeExpectedWindow(
+      original.windowId,
+      'target-original',
+    )).resolves.toBe(true);
     expect(harness.removeCalls).toEqual([original.windowId]);
     expect(harness.liveWindows.has(replacement.windowId)).toBe(true);
     expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(replacement.windowId);

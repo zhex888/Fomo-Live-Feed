@@ -12,6 +12,8 @@ const TRANSACTION = {
   sourceWindowId: 7,
   phase: 'awaiting-ready',
   startedAt: 1_700_000_000_000,
+  sourceIdentity: { hostWindowId: 7, instanceToken: 'source-panel' },
+  targetIdentity: { instanceToken: 'target-float' },
 } as const;
 
 describe('surface-ready response parsing', () => {

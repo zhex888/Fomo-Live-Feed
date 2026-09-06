@@ -524,12 +524,13 @@ describe('protocol', () => {
             source: 'sidepanel',
             target: 'floating',
             sourceWindowId: 7,
+            instanceToken: 'panel-instance',
           },
         },
         {
           protocolVersion: 1,
           type: 'surface.bootstrap',
-          payload: { surface: 'floating', windowId: 8 },
+          payload: { surface: 'floating', windowId: 8, instanceToken: 'float-instance' },
         },
         {
           protocolVersion: 1,
@@ -538,6 +539,8 @@ describe('protocol', () => {
             switchId: 'switch-1',
             surface: 'floating',
             eventWatermark: 12,
+            windowId: 8,
+            instanceToken: 'float-instance',
           },
         },
       ];

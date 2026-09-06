@@ -233,6 +233,8 @@ describe('SidePanelApp', () => {
         sourceWindowId: 17,
         phase: 'opening',
         startedAt: 1_800_000_000_000,
+        sourceIdentity: { hostWindowId: 17, instanceToken: 'source-panel' },
+        targetIdentity: { instanceToken: 'target-float' },
       },
     });
     render(<SidePanelApp deps={harness.deps} />);
@@ -251,6 +253,8 @@ describe('SidePanelApp', () => {
         sourceWindowId: 17,
         phase: 'awaiting-ready',
         startedAt: 1_800_000_000_000,
+        sourceIdentity: { hostWindowId: 17, instanceToken: 'source-panel' },
+        targetIdentity: { hostWindowId: 23, instanceToken: 'target-float' },
       },
     });
 

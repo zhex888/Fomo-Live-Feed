@@ -12,7 +12,7 @@ export interface SurfaceSwitchRequest {
   source: SurfaceKey;
   target: SurfaceKey;
   sourceWindowId: number;
-  sourceIdentity?: PipSurfaceIdentity;
+  sourceIdentity?: PipSurfaceIdentity | SurfaceInstanceIdentity;
   targetIdentity?: FloatingSurfaceIdentity;
 }
 
@@ -22,13 +22,20 @@ export interface PipSurfaceIdentity {
 }
 
 export interface FloatingSurfaceIdentity {
+  hostWindowId?: number;
+  instanceToken: string;
+}
+
+export interface SurfaceInstanceIdentity {
   hostWindowId: number;
+  instanceToken: string;
 }
 
 export interface SurfaceReady {
   switchId: string;
   surface: SurfaceKey;
   eventWatermark: number;
+  targetIdentity?: SurfaceInstanceIdentity;
 }
 
 export interface SwitchTransaction extends SurfaceSwitchRequest {
@@ -48,10 +55,10 @@ export type SurfaceSwitchResult =
   | { ok: false; switchId: string; reason: SurfaceSwitchFailure };
 
 export interface SurfaceOperations {
-  openFloating(ownerWindowId: number): Promise<boolean | number>;
+  openFloating(ownerWindowId: number, instanceToken: string): Promise<boolean | number>;
   openSidePanel(windowId: number): Promise<boolean>;
   closeFloating(expected?: PipSurfaceIdentity | FloatingSurfaceIdentity): Promise<boolean>;
-  closeSidePanel(windowId: number): Promise<boolean>;
+  closeSidePanel(windowId: number, expected?: SurfaceInstanceIdentity): Promise<boolean>;
   saveDisplayMode(mode: SurfaceKey): Promise<void>;
 }
 
@@ -131,6 +138,40 @@ const TRANSACTION_KEYS = [
 const SOURCE_IDENTITY_KEY = 'sourceIdentity';
 const TARGET_IDENTITY_KEY = 'targetIdentity';
 
+const isBoundedToken = (value: unknown): value is string =>
+  typeof value === 'string'
+  && value.trim() === value
+  && value.length > 0
+  && value.length <= 128;
+
+const isSourceIdentity = (value: unknown, source: unknown): boolean => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const identity = value as Record<string, unknown>;
+  if (
+    !Number.isInteger(identity.hostWindowId)
+    || (identity.hostWindowId as number) < 0
+  ) return false;
+  if (Object.hasOwn(identity, 'sessionId')) {
+    return source === 'floating'
+      && Object.keys(identity).length === 2
+      && isBoundedToken(identity.sessionId);
+  }
+  return Object.keys(identity).length === 2 && isBoundedToken(identity.instanceToken);
+};
+
+const isTargetIdentity = (value: unknown, target: unknown): boolean => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const identity = value as Record<string, unknown>;
+  if (!isBoundedToken(identity.instanceToken)) return false;
+  const keys = Object.keys(identity);
+  if (!Object.hasOwn(identity, 'hostWindowId')) {
+    return target === 'floating' && keys.length === 1;
+  }
+  return keys.length === 2
+    && Number.isInteger(identity.hostWindowId)
+    && (identity.hostWindowId as number) >= 0;
+};
+
 export function parseSwitchTransaction(
   value: unknown,
   now: number,
@@ -174,35 +215,21 @@ export function parseSwitchTransaction(
     ].includes(String(item.phase))
     || (
       hasSourceIdentity
-      && (
-        item.source !== 'floating'
-        || typeof sourceIdentity !== 'object'
-        || sourceIdentity === null
-        || Array.isArray(sourceIdentity)
-        || Object.keys(sourceIdentity).length !== 2
-        || !Object.hasOwn(sourceIdentity, 'hostWindowId')
-        || !Object.hasOwn(sourceIdentity, 'sessionId')
-        || !Number.isInteger((sourceIdentity as Record<string, unknown>).hostWindowId)
-        || ((sourceIdentity as Record<string, unknown>).hostWindowId as number) < 0
-        || typeof (sourceIdentity as Record<string, unknown>).sessionId !== 'string'
-        || ((sourceIdentity as Record<string, unknown>).sessionId as string).trim()
-          !== (sourceIdentity as Record<string, unknown>).sessionId
-        || ((sourceIdentity as Record<string, unknown>).sessionId as string).length === 0
-        || ((sourceIdentity as Record<string, unknown>).sessionId as string).length > 128
-      )
+      && !isSourceIdentity(sourceIdentity, item.source)
     )
     || (
       hasTargetIdentity
-      && (
-        item.target !== 'floating'
-        || typeof targetIdentity !== 'object'
-        || targetIdentity === null
-        || Array.isArray(targetIdentity)
-        || Object.keys(targetIdentity).length !== 1
-        || !Object.hasOwn(targetIdentity, 'hostWindowId')
-        || !Number.isInteger((targetIdentity as Record<string, unknown>).hostWindowId)
-        || ((targetIdentity as Record<string, unknown>).hostWindowId as number) < 0
+      && !isTargetIdentity(targetIdentity, item.target)
+    )
+    || (
+      ['opening', 'awaiting-ready', 'closing-source'].includes(String(item.phase))
+      && !hasSourceIdentity
+    )
+    || (
+      ['opening', 'awaiting-ready', 'rolling-back-mode', 'closing-target'].includes(
+        String(item.phase),
       )
+      && !hasTargetIdentity
     )
   ) return undefined;
   return item as unknown as SwitchTransaction;
@@ -315,6 +342,21 @@ export class SurfaceSwitchCoordinator {
       this.restoredOwnsDetachedCleanupKey = false;
       return undefined;
     }
+    if (transaction.phase === 'opening') {
+      transaction.phase = 'closing-target';
+      try {
+        await this.persist(transaction);
+      } catch {
+        // The original opening record still carries the generation needed by
+        // the next worker; keep the in-memory barrier and reconcile it now.
+      }
+      const active = this.createRestoredCleanupBarrier(transaction, mainOwnsDetached);
+      this.active = active;
+      this.restored = undefined;
+      this.restoredOwnsDetachedCleanupKey = false;
+      this.scheduleTargetCleanup(active);
+      return transaction;
+    }
     if (
       transaction.phase === 'closing-target'
       || transaction.phase === 'closing-source'
@@ -334,7 +376,10 @@ export class SurfaceSwitchCoordinator {
     return transaction;
   }
 
-  async bootstrap(surface: SurfaceKey): Promise<SwitchTransaction | undefined> {
+  async bootstrap(
+    surface: SurfaceKey,
+    identity?: SurfaceInstanceIdentity,
+  ): Promise<SwitchTransaction | undefined> {
     if (this.detachedTargetCleanup?.transaction.target === surface) {
       const cleanup = this.detachedTargetCleanup;
       const closed = await this.reconcileDetachedTargetCleanup(cleanup);
@@ -349,6 +394,18 @@ export class SurfaceSwitchCoordinator {
       }
     }
     const transaction = this.active?.transaction ?? this.restored;
+    if (
+      transaction?.target === surface
+      && identity !== undefined
+      && (transaction.phase === 'opening' || transaction.phase === 'awaiting-ready')
+    ) {
+      transaction.targetIdentity = { ...identity };
+      try {
+        await this.persist(transaction);
+      } catch {
+        return transaction;
+      }
+    }
     if (
       transaction?.target === surface
       && (
@@ -418,6 +475,15 @@ export class SurfaceSwitchCoordinator {
     return this.startRequest(request);
   }
 
+  isAdmissionBlocked(switchId?: string): boolean {
+    return this.restoreAdmissionBlocked
+      || this.restoring !== undefined
+      || this.trustedRestoreAdmission !== undefined
+      || this.detachedTargetCleanup !== undefined
+      || (this.active !== undefined && this.active.transaction.switchId !== switchId)
+      || this.restored !== undefined;
+  }
+
   requestTrustedWhileRestoring(
     request: SurfaceSwitchRequest,
   ): Promise<SurfaceSwitchResult> {
@@ -436,6 +502,10 @@ export class SurfaceSwitchCoordinator {
     const openPromise = this.openTargetOperation(request);
     const cleanupTransaction: SwitchTransaction = {
       ...request,
+      targetIdentity: request.targetIdentity ?? {
+        ...(request.target === 'sidepanel' ? { hostWindowId: request.sourceWindowId } : {}),
+        instanceToken: request.switchId,
+      },
       phase: 'closing-target',
       startedAt: this.now(),
     };
@@ -507,6 +577,10 @@ export class SurfaceSwitchCoordinator {
     const promise = new Promise<SurfaceSwitchResult>((done) => { resolve = done; });
     const transaction: SwitchTransaction = {
       ...request,
+      targetIdentity: request.targetIdentity ?? {
+        ...(request.target === 'sidepanel' ? { hostWindowId: request.sourceWindowId } : {}),
+        instanceToken: request.switchId,
+      },
       phase: 'opening',
       startedAt: this.now(),
     };
@@ -584,6 +658,13 @@ export class SurfaceSwitchCoordinator {
       || transaction.switchId !== ready.switchId
       || transaction.target !== ready.surface
       || transaction.phase !== 'awaiting-ready'
+      || (
+        ready.targetIdentity !== undefined
+        && (
+          transaction.targetIdentity?.hostWindowId !== ready.targetIdentity.hostWindowId
+          || transaction.targetIdentity.instanceToken !== ready.targetIdentity.instanceToken
+        )
+      )
     ) {
       return { ok: false, switchId: ready.switchId, reason: 'stale-switch' };
     }
@@ -622,7 +703,12 @@ export class SurfaceSwitchCoordinator {
     let closed = false;
     try {
       closed = active.transaction.source === 'sidepanel'
-        ? await this.options.operations.closeSidePanel(active.transaction.sourceWindowId)
+        ? await this.options.operations.closeSidePanel(
+          active.transaction.sourceWindowId,
+          'instanceToken' in (active.transaction.sourceIdentity ?? {})
+            ? active.transaction.sourceIdentity as SurfaceInstanceIdentity
+            : undefined,
+        )
         : await this.options.operations.closeFloating(active.transaction.sourceIdentity);
     } catch {
       closed = false;
@@ -685,9 +771,15 @@ export class SurfaceSwitchCoordinator {
 
   private openTargetOperation(request: SurfaceSwitchRequest): Promise<boolean> {
     return request.target === 'floating'
-      ? this.options.operations.openFloating(request.sourceWindowId).then((result) => {
+      ? this.options.operations.openFloating(
+        request.sourceWindowId,
+        request.targetIdentity?.instanceToken ?? request.switchId,
+      ).then((result) => {
         if (typeof result === 'number') {
-          request.targetIdentity = { hostWindowId: result };
+          request.targetIdentity = {
+            hostWindowId: result,
+            instanceToken: request.targetIdentity?.instanceToken ?? request.switchId,
+          };
           return true;
         }
         return result;
@@ -787,10 +879,16 @@ export class SurfaceSwitchCoordinator {
   }
 
   private async closeTarget(transaction: SwitchTransaction): Promise<boolean> {
+    if (transaction.targetIdentity === undefined) return true;
     try {
       return transaction.target === 'floating'
         ? await this.options.operations.closeFloating(transaction.targetIdentity)
-        : await this.options.operations.closeSidePanel(transaction.sourceWindowId);
+        : await this.options.operations.closeSidePanel(
+          transaction.sourceWindowId,
+          transaction.targetIdentity?.hostWindowId === undefined
+            ? undefined
+            : transaction.targetIdentity as SurfaceInstanceIdentity,
+        );
     } catch {
       return false;
     }
@@ -868,7 +966,12 @@ export class SurfaceSwitchCoordinator {
       }
       try {
         const closed = active.transaction.source === 'sidepanel'
-          ? await this.options.operations.closeSidePanel(active.transaction.sourceWindowId)
+          ? await this.options.operations.closeSidePanel(
+            active.transaction.sourceWindowId,
+            'instanceToken' in (active.transaction.sourceIdentity ?? {})
+              ? active.transaction.sourceIdentity as SurfaceInstanceIdentity
+              : undefined,
+          )
           : await this.options.operations.closeFloating(active.transaction.sourceIdentity);
         return closed ? 'closed' : 'close-failed';
       } catch {

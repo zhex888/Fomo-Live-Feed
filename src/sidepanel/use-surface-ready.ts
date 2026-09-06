@@ -10,6 +10,7 @@ import {
   parseSurfaceBootstrapResult,
   parseSurfaceReadyResult,
 } from './surface-switch-client';
+import type { SurfaceSwitchClient } from './surface-switch-client';
 
 export { parseSurfaceBootstrapResult, parseSurfaceReadyResult };
 
@@ -21,13 +22,14 @@ export interface SurfaceReadyOptions {
   eventWatermark: number;
   trackAcknowledgement?: boolean;
   now?: () => number;
+  client?: SurfaceSwitchClient;
 }
 
 /** Completes a pending cross-surface transaction once this surface is usable. */
 export function useSurfaceReady(options: SurfaceReadyOptions): boolean {
   const client = useMemo(
-    () => createSurfaceSwitchClient(options.runtime, options.now),
-    [options.now, options.runtime],
+    () => options.client ?? createSurfaceSwitchClient(options.runtime, options.now),
+    [options.client, options.now, options.runtime],
   );
   const [acknowledged, setAcknowledged] = useState(false);
 
@@ -76,6 +78,7 @@ export function useSurfaceReady(options: SurfaceReadyOptions): boolean {
           transaction.switchId,
           options.surface,
           options.eventWatermark,
+          windowId,
         );
         if (result?.ok) {
           readySwitchId = transaction.switchId;
@@ -111,6 +114,7 @@ export function useSurfaceReady(options: SurfaceReadyOptions): boolean {
     options.eventWatermark,
     options.getCurrentWindowId,
     options.now,
+    options.client,
     options.runtime,
     options.surface,
     options.trackAcknowledgement,

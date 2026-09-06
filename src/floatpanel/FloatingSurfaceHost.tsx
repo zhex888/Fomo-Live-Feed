@@ -151,6 +151,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     eventWatermark: 0,
     trackAcknowledgement: true,
     now: deps.now,
+    client: surfaceSwitchClient,
   });
 
   useEffect(() => {
@@ -432,7 +433,10 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   return (
     <div className="floating-surface-host" data-state={state} data-theme={theme}>
       {showFeed && (
-        <SidePanelApp deps={{ ...deps, readEnabled: !childOwnsRead }} />
+        <SidePanelApp
+          deps={{ ...deps, readEnabled: !childOwnsRead }}
+          surfaceSwitchClient={surfaceSwitchClient}
+        />
       )}
 
       {state === 'unsupported' ? (

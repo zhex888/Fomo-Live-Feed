@@ -39,7 +39,10 @@ import {
   type PipelineHealthQueryResponse,
   type SyncQueryResponse,
 } from '../src/messaging/protocol';
-import { SurfaceSwitchCoordinator } from '../src/background/surface-switch-coordinator';
+import {
+  SurfaceSwitchCoordinator,
+  type SurfaceSwitchResult,
+} from '../src/background/surface-switch-coordinator';
 import {
   CaptureRecovery,
   type CaptureRecoveryTabs,
@@ -93,6 +96,7 @@ import {
 const METRIC_TTL_MS = 5 * 60 * 1_000;
 const METRIC_FAILURE_BACKOFF_MS = 60 * 1_000;
 const PIPELINE_HEALTH_NOTIFICATION_DELAY_MS = 50;
+const SIDE_PANEL_INSTANCE_TOKENS_SESSION_KEY = 'surfaceSwitch.sidePanelInstances.v1';
 
 // Fomo tab patterns for the popup connection.query verdict (plan Task 9
 // Step 3): derived from the SINGLE shared origin catalog in guards.ts
@@ -260,10 +264,44 @@ export default defineBackground(() => {
   const sidePanelChrome = (
     globalThis as typeof globalThis & { chrome?: ChromeWithOptionalSidePanel }
   ).chrome ?? browser as unknown as ChromeWithOptionalSidePanel;
+  const sidePanelInstanceTokens = new Map<number, string>();
+  let sidePanelTokenMutation = Promise.resolve();
+  const readSidePanelToken = async (windowId: number): Promise<string | undefined> => {
+    const cached = sidePanelInstanceTokens.get(windowId);
+    if (cached !== undefined) return cached;
+    const stored = await sessionStorage.get([SIDE_PANEL_INSTANCE_TOKENS_SESSION_KEY]);
+    const registry = stored[SIDE_PANEL_INSTANCE_TOKENS_SESSION_KEY];
+    if (typeof registry !== 'object' || registry === null || Array.isArray(registry)) {
+      return undefined;
+    }
+    const token = (registry as Record<string, unknown>)[String(windowId)];
+    if (typeof token !== 'string' || token.length === 0 || token.length > 128) return undefined;
+    sidePanelInstanceTokens.set(windowId, token);
+    return token;
+  };
+  const writeSidePanelToken = (
+    windowId: number,
+    instanceToken: string | undefined,
+  ): Promise<void> => {
+    const mutation = sidePanelTokenMutation.catch(() => {}).then(async () => {
+      const stored = await sessionStorage.get([SIDE_PANEL_INSTANCE_TOKENS_SESSION_KEY]);
+      const raw = stored[SIDE_PANEL_INSTANCE_TOKENS_SESSION_KEY];
+      const registry = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+        ? { ...raw as Record<string, unknown> }
+        : {};
+      if (instanceToken === undefined) delete registry[String(windowId)];
+      else registry[String(windowId)] = instanceToken;
+      await sessionStorage.set({ [SIDE_PANEL_INSTANCE_TOKENS_SESSION_KEY]: registry });
+      if (instanceToken === undefined) sidePanelInstanceTokens.delete(windowId);
+      else sidePanelInstanceTokens.set(windowId, instanceToken);
+    });
+    sidePanelTokenMutation = mutation;
+    return mutation;
+  };
   const surfaceSwitchCoordinator = new SurfaceSwitchCoordinator({
     operations: {
-      openFloating: async (ownerWindowId) => {
-        const result = await floatWindowManager.openOrFocus(ownerWindowId);
+      openFloating: async (ownerWindowId, instanceToken) => {
+        const result = await floatWindowManager.openOrFocus(ownerWindowId, instanceToken);
         return result.ok ? result.windowId : false;
       },
       openSidePanel: (sourceWindowId) => openSidePanelForWindow(
@@ -274,11 +312,22 @@ export default defineBackground(() => {
         ? floatWindowManager.close()
         : 'sessionId' in expected
           ? floatWindowManager.closeExpectedPip(expected.hostWindowId, expected.sessionId)
-          : floatWindowManager.closeExpectedWindow(expected.hostWindowId),
-      closeSidePanel: (sourceWindowId) => closeSidePanelForWindow(
-        floatWindowManager.cachedOwnerWindowId() ?? sourceWindowId,
-        sidePanelChrome,
-      ),
+          : floatWindowManager.closeExpectedWindow(
+            expected.hostWindowId,
+            expected.instanceToken,
+          ),
+      closeSidePanel: async (_sourceWindowId, expected) => {
+        if (expected === undefined) return false;
+        const currentToken = await readSidePanelToken(expected.hostWindowId);
+        if (currentToken === undefined) return false;
+        if (currentToken !== expected.instanceToken) return true;
+        const closed = await closeSidePanelForWindow(expected.hostWindowId, sidePanelChrome);
+        if (closed && sidePanelInstanceTokens.get(expected.hostWindowId) === currentToken) {
+          sidePanelInstanceTokens.delete(expected.hostWindowId);
+          void writeSidePanelToken(expected.hostWindowId, undefined).catch(() => {});
+        }
+        return closed;
+      },
       saveDisplayMode: async (mode) => {
         await preferences.updateSettings({ displayMode: mode });
         currentDisplayMode = mode;
@@ -877,26 +926,83 @@ export default defineBackground(() => {
             .saveGeometry(message.payload as FloatWindowGeometry)
             .then(() => ({ ok: true as const }))
             .catch(() => ({ ok: false as const }));
-        case 'surface.switch.request':
-          return surfaceSwitchCoordinator.request(message.payload).then((result) => {
-            broadcastSurfaceSwitchChanged(result);
-            return result;
-          });
-        case 'surface.bootstrap':
+        case 'surface.switch.request': {
+          if (surfaceSwitchCoordinator.isAdmissionBlocked(message.payload.switchId)) return {
+            ok: false as const,
+            switchId: message.payload.switchId,
+            reason: 'switch-in-progress' as const,
+          };
+          const requestSwitch = (): Promise<SurfaceSwitchResult> =>
+            surfaceSwitchCoordinator.request({
+              switchId: message.payload.switchId,
+              source: message.payload.source,
+              target: message.payload.target,
+              sourceWindowId: message.payload.sourceWindowId,
+              sourceIdentity: {
+                hostWindowId: message.payload.sourceWindowId,
+                instanceToken: message.payload.instanceToken,
+              },
+            }).then((result) => {
+              broadcastSurfaceSwitchChanged(result);
+              return result;
+            });
+          const staleResult = {
+            ok: false as const,
+            switchId: message.payload.switchId,
+            reason: 'stale-switch' as const,
+          };
+          if (message.payload.source === 'sidepanel') {
+            return readSidePanelToken(message.payload.sourceWindowId).then((token) => (
+              token === message.payload.instanceToken ? requestSwitch() : staleResult
+            ));
+          }
+          return floatWindowManager.surfaceInstanceMatches(
+            message.payload.sourceWindowId,
+            message.payload.instanceToken,
+          ).then((matches) => (matches ? requestSwitch() : staleResult));
+        }
+        case 'surface.bootstrap': {
           void captureRecovery.ensureCapture('surface-open').catch(() => {});
-          return Promise.all([
-            surfaceSwitchCoordinator.bootstrap(message.payload.surface),
+          const identity = {
+            hostWindowId: message.payload.windowId,
+            instanceToken: message.payload.instanceToken,
+          };
+          const register = message.payload.surface === 'floating'
+            ? floatWindowManager.registerSurfaceInstance(
+              message.payload.windowId,
+              message.payload.instanceToken,
+            )
+            : writeSidePanelToken(
+              message.payload.windowId,
+              message.payload.instanceToken,
+            );
+          return register.then(() => Promise.all([
+            surfaceSwitchCoordinator.bootstrap(message.payload.surface, identity),
             message.payload.surface === 'floating'
               ? floatWindowManager.ownerWindowId()
               : Promise.resolve(undefined),
-          ]).then(
+          ])).then(
             ([transaction]) => ({
               ok: true as const,
               ...(transaction === undefined ? {} : { transaction }),
             }),
           );
-        case 'surface.ready':
+        }
+        case 'surface.ready': {
+          const tokenMatches = message.payload.surface === 'sidepanel'
+            ? sidePanelInstanceTokens.get(message.payload.windowId)
+              === message.payload.instanceToken
+            : floatWindowManager.cachedSurfaceInstanceMatches(
+              message.payload.windowId,
+              message.payload.instanceToken,
+            );
+          if (!tokenMatches) return {
+            ok: false as const,
+            switchId: message.payload.switchId,
+            reason: 'stale-switch' as const,
+          };
           return surfaceSwitchCoordinator.ready(message.payload);
+        }
         case 'surface.switch.changed':
         case 'surface.switch.started':
           return undefined;

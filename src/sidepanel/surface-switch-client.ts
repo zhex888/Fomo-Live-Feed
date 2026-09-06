@@ -15,6 +15,7 @@ export interface SurfaceBootstrapResult {
 }
 
 export interface SurfaceSwitchClient {
+  readonly instanceToken: string;
   switchTo(
     source: SurfaceKey,
     target: SurfaceKey,
@@ -25,6 +26,7 @@ export interface SurfaceSwitchClient {
     switchId: string,
     surface: SurfaceKey,
     eventWatermark: number,
+    windowId: number,
   ): Promise<SurfaceSwitchResult>;
   returnToSidePanel(
     sessionId: string,
@@ -100,13 +102,15 @@ export function createSurfaceSwitchClient(
   runtime: PopupRuntimeLike,
   now: () => number = Date.now,
 ): SurfaceSwitchClient {
+  const instanceToken = switchId();
   return {
+    instanceToken,
     async switchTo(source, target, sourceWindowId) {
       const id = switchId();
       const response = await runtime.sendMessage({
         protocolVersion: 1,
         type: 'surface.switch.request',
-        payload: { switchId: id, source, target, sourceWindowId },
+        payload: { switchId: id, source, target, sourceWindowId, instanceToken },
       });
       return requireResponse(
         parseSurfaceSwitchResult(response, id),
@@ -117,15 +121,15 @@ export function createSurfaceSwitchClient(
       const response = await runtime.sendMessage({
         protocolVersion: 1,
         type: 'surface.bootstrap',
-        payload: { surface, windowId },
+        payload: { surface, windowId, instanceToken },
       });
       return requireResponse(parseSurfaceBootstrapResult(response, now()), 'surface.bootstrap');
     },
-    async ready(id, surface, eventWatermark) {
+    async ready(id, surface, eventWatermark, windowId) {
       const response = await runtime.sendMessage({
         protocolVersion: 1,
         type: 'surface.ready',
-        payload: { switchId: id, surface, eventWatermark },
+        payload: { switchId: id, surface, eventWatermark, windowId, instanceToken },
       });
       return requireResponse(parseSurfaceSwitchResult(response, id), 'surface.ready');
     },

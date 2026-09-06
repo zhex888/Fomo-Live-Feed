@@ -228,6 +228,7 @@ const surfaceSwitchRequestPayloadSchema = z
     source: z.enum(SURFACE_KEYS),
     target: z.enum(SURFACE_KEYS),
     sourceWindowId: z.number().int().nonnegative(),
+    instanceToken: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
   })
   .strict()
   .refine(({ source, target }) => source !== target, {
@@ -238,6 +239,7 @@ const surfaceBootstrapPayloadSchema = z
   .object({
     surface: z.enum(SURFACE_KEYS),
     windowId: z.number().int().nonnegative(),
+    instanceToken: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
   })
   .strict();
 
@@ -246,6 +248,8 @@ const surfaceReadyPayloadSchema = z
     switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
     surface: z.enum(SURFACE_KEYS),
     eventWatermark: z.number().int().nonnegative(),
+    windowId: z.number().int().nonnegative(),
+    instanceToken: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
   })
   .strict();
 
