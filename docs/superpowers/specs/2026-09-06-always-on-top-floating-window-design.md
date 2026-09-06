@@ -106,14 +106,24 @@ The manager does not attempt to force an ordinary popup above other windows.
 
 ### `SurfaceSwitchCoordinator`
 
-The coordinator gains a `pip` readiness phase while preserving the current
+The existing coordinator remains responsible for the user-facing switch between
+the Side Panel and the floating host. It preserves the current
 source-before-destination safety rule:
 
 ```text
 Side Panel
   -> host ready
   -> close Side Panel
-  -> user activation
+```
+
+Waiting for the required user activation is intentionally not part of this
+transaction because the user may leave the host open for an arbitrary amount of
+time. A host-local PiP promotion transaction begins only when the user clicks the
+activation control:
+
+```text
+User activation
+  -> request PiP synchronously
   -> PiP ready
   -> minimize host
 ```
@@ -128,7 +138,9 @@ PiP return action
 ```
 
 The preference remains `displayMode: 'floating'`; `host` and `pip` are runtime
-surface phases, not new user-facing display modes.
+surface phases, not new user-facing display modes. The host-local promotion uses
+its own bounded readiness timeout and cannot leave the global surface switch
+transaction waiting on user input.
 
 ## State and messaging
 
