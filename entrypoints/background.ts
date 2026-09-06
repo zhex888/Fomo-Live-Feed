@@ -328,6 +328,24 @@ export default defineBackground(() => {
         }
         return closed;
       },
+      isSourceLive: async (transaction) => {
+        const identity = transaction.sourceIdentity;
+        if (identity === undefined) return false;
+        if (transaction.source === 'sidepanel') {
+          if (!('instanceToken' in identity)) return false;
+          return await readSidePanelToken(identity.hostWindowId) === identity.instanceToken;
+        }
+        if ('sessionId' in identity) {
+          const active = await floatWindowManager.activePipSession();
+          return active.ok
+            && active.session?.hostWindowId === identity.hostWindowId
+            && active.session.sessionId === identity.sessionId;
+        }
+        return floatWindowManager.surfaceInstanceMatches(
+          identity.hostWindowId,
+          identity.instanceToken,
+        );
+      },
       saveDisplayMode: async (mode) => {
         await preferences.updateSettings({ displayMode: mode });
         currentDisplayMode = mode;

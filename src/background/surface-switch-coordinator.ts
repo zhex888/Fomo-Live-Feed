@@ -6,6 +6,8 @@ import type {
 export const SURFACE_SWITCH_STORAGE_KEY = 'surfaceSwitch.transaction.v1';
 export const SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY =
   'surfaceSwitch.detachedCleanup.v1';
+export const SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY =
+  'surfaceSwitch.abandonedTarget.v1';
 
 export interface SurfaceSwitchRequest {
   switchId: string;
@@ -76,6 +78,7 @@ export interface SurfaceOperations {
   closeFloating(expected?: PipSurfaceIdentity | FloatingSurfaceIdentity): Promise<boolean>;
   closeSidePanel(windowId: number, expected?: SurfaceInstanceIdentity): Promise<boolean>;
   saveDisplayMode(mode: SurfaceKey): Promise<void>;
+  isSourceLive?(transaction: SwitchTransaction): Promise<boolean>;
 }
 
 export interface SurfaceSwitchStorage {
@@ -348,6 +351,7 @@ export class SurfaceSwitchCoordinator {
     promise: Promise<SurfaceSwitchResult>;
   } | undefined;
   private detachedTargetCleanup: DetachedTargetCleanup | undefined;
+  private abandonedTarget: SwitchTransaction | undefined;
 
   constructor(private readonly options: CoordinatorOptions) {
     this.now = options.now ?? (() => Date.now());
@@ -380,7 +384,21 @@ export class SurfaceSwitchCoordinator {
     const stored = await this.options.storage.get([
       SURFACE_SWITCH_STORAGE_KEY,
       SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY,
+      SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY,
     ]);
+    const abandonedTarget = parseSwitchTransaction(
+      stored[SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY],
+      this.now(),
+    );
+    if (
+      abandonedTarget?.phase === 'target-unidentified'
+      && abandonedTarget.sourceIdentity !== undefined
+    ) {
+      this.abandonedTarget = abandonedTarget;
+    } else if (stored[SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY] !== undefined) {
+      await this.clearAbandonedStored();
+      this.abandonedTarget = undefined;
+    }
     const detachedTransaction = parseSwitchTransaction(
       stored[SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY],
       this.now(),
@@ -393,6 +411,19 @@ export class SurfaceSwitchCoordinator {
       rawTransaction,
       this.now(),
     );
+    if (transaction?.phase === 'target-unidentified') {
+      await this.options.storage.set({
+        [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: transaction,
+        [SURFACE_SWITCH_STORAGE_KEY]: null,
+        ...(detachedTransaction?.switchId === transaction.switchId
+          ? { [SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY]: null }
+          : {}),
+      });
+      this.abandonedTarget = transaction;
+      this.restored = undefined;
+      this.restoredOwnsDetachedCleanupKey = false;
+      return undefined;
+    }
     if (
       transaction?.phase === 'closing-target'
       && typeof rawTransaction === 'object'
@@ -409,14 +440,18 @@ export class SurfaceSwitchCoordinator {
         transaction.phase === 'closing-target'
         || transaction.phase === 'closing-source'
         || transaction.phase === 'rolling-back-mode'
-        || transaction.phase === 'target-unidentified'
         || transaction.phase === 'target-closed'
         || transaction.phase === 'source-closed'
         || this.now() - transaction.startedAt < this.timeoutMs
       );
-    if (
+    if (detachedTransaction?.phase === 'target-unidentified' && !mainOwnsDetached) {
+      await this.options.storage.set({
+        [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: detachedTransaction,
+        [SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY]: null,
+      });
+      this.abandonedTarget = detachedTransaction;
+    } else if (
       (detachedTransaction?.phase === 'closing-target'
-        || detachedTransaction?.phase === 'target-unidentified'
         || detachedTransaction?.phase === 'target-closed'
         || detachedTransaction?.phase === 'source-closed')
       && !mainOwnsDetached
@@ -445,7 +480,6 @@ export class SurfaceSwitchCoordinator {
         transaction.phase !== 'closing-target'
         && transaction.phase !== 'closing-source'
         && transaction.phase !== 'rolling-back-mode'
-        && transaction.phase !== 'target-unidentified'
         && transaction.phase !== 'target-closed'
         && transaction.phase !== 'source-closed'
         && this.now() - transaction.startedAt >= this.timeoutMs
@@ -475,7 +509,6 @@ export class SurfaceSwitchCoordinator {
       transaction.phase === 'closing-target'
       || transaction.phase === 'closing-source'
       || transaction.phase === 'rolling-back-mode'
-      || transaction.phase === 'target-unidentified'
       || transaction.phase === 'target-closed'
       || transaction.phase === 'source-closed'
     ) {
@@ -550,7 +583,14 @@ export class SurfaceSwitchCoordinator {
     ) {
       transaction.targetIdentity = { ...identity };
       try {
-        await this.persist(transaction);
+        const supersedesAbandoned = this.abandonedMatches(surface, identity);
+        await this.options.storage.set({
+          [SURFACE_SWITCH_STORAGE_KEY]: transaction,
+          ...(supersedesAbandoned
+            ? { [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: null }
+            : {}),
+        });
+        if (supersedesAbandoned) this.abandonedTarget = undefined;
         if (this.active?.transaction === transaction) {
           clearTimeout(this.active.targetCleanupTimer);
           this.active.targetCleanupTimer = undefined;
@@ -588,7 +628,9 @@ export class SurfaceSwitchCoordinator {
       }
       return undefined;
     }
-    return transaction?.target === surface ? transaction : undefined;
+    if (transaction?.target === surface) return transaction;
+    await this.reconcileAbandonedTarget(surface, identity);
+    return undefined;
   }
 
   request(request: SurfaceSwitchRequest): Promise<SurfaceSwitchResult> {
@@ -1268,9 +1310,26 @@ export class SurfaceSwitchCoordinator {
 
   private async reconcileTargetCleanup(active: ActiveSwitch): Promise<boolean> {
     if (this.active !== active) return true;
+    if (active.transaction.phase === 'target-unidentified') {
+      if (active.durableMarker === undefined) {
+        active.durableMarker = this.persistAbandonedMain(active).then(
+          () => true,
+          () => false,
+        );
+      }
+      const operation = active.durableMarker;
+      const persisted = await operation;
+      if (active.durableMarker === operation) active.durableMarker = undefined;
+      if (!persisted) {
+        this.scheduleTargetCleanup(active);
+        return false;
+      }
+      this.abandonedTarget = { ...active.transaction };
+      this.releaseMainTargetCleanup(active);
+      return true;
+    }
     if (
       active.transaction.phase === 'target-closed'
-      || active.transaction.phase === 'target-unidentified'
       || active.transaction.phase === 'source-closed'
     ) {
       return this.reconcileDurableTargetCleanup(
@@ -1413,6 +1472,9 @@ export class SurfaceSwitchCoordinator {
     if (this.detachedTargetCleanup !== cleanup) return true;
     if (cleanup.state === 'pending-admission') return false;
     if (cleanup.state === 'marking-closed') {
+      if (cleanup.transaction.phase === 'target-unidentified') {
+        return this.reconcileDetachedAbandonedTarget(cleanup);
+      }
       return this.reconcileDetachedClosedMarker(cleanup);
     }
     if (cleanup.state === 'clearing') return this.reconcileDetachedDurableClear(cleanup);
@@ -1453,13 +1515,80 @@ export class SurfaceSwitchCoordinator {
     if (identity === undefined || expected.hostWindowId !== identity.hostWindowId) return false;
     cleanup.transaction.targetIdentity = { ...identity };
     try {
-      await this.persistDetached(cleanup.transaction);
+      const supersedesAbandoned = this.abandonedMatches(
+        cleanup.transaction.target,
+        identity,
+      );
+      await this.options.storage.set({
+        [SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY]: cleanup.transaction,
+        ...(supersedesAbandoned
+          ? { [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: null }
+          : {}),
+      });
+      if (supersedesAbandoned) this.abandonedTarget = undefined;
       clearTimeout(cleanup.timer);
       cleanup.timer = undefined;
       return true;
     } catch {
       cleanup.transaction.targetIdentity = expected;
       return false;
+    }
+  }
+
+  private abandonedMatches(
+    surface: SurfaceKey,
+    identity: SurfaceInstanceIdentity,
+  ): boolean {
+    const abandoned = this.abandonedTarget;
+    if (abandoned?.target !== surface || abandoned.targetIdentity === undefined) return false;
+    return (
+      abandoned.targetIdentity.hostWindowId === undefined
+      || abandoned.targetIdentity.hostWindowId === identity.hostWindowId
+    );
+  }
+
+  private async reconcileAbandonedTarget(
+    surface: SurfaceKey,
+    identity: SurfaceInstanceIdentity | undefined,
+  ): Promise<void> {
+    const abandoned = this.abandonedTarget;
+    const expectedTarget = abandoned?.targetIdentity;
+    if (
+      abandoned === undefined
+      || expectedTarget === undefined
+      || identity === undefined
+      || !this.abandonedMatches(surface, identity)
+    ) return;
+    const sourceLive = await this.options.operations.isSourceLive?.(abandoned) ?? false;
+    if (!sourceLive) {
+      try {
+        await this.clearAbandonedStored();
+        if (this.abandonedTarget === abandoned) this.abandonedTarget = undefined;
+      } catch {
+        // Keep the non-blocking tombstone for a later bootstrap or worker wake.
+      }
+      return;
+    }
+    const cleanup = {
+      ...abandoned,
+      targetIdentity: hasInstanceToken(expectedTarget)
+        ? expectedTarget
+        : { ...identity },
+    };
+    try {
+      await this.options.storage.set({
+        [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: cleanup,
+      });
+    } catch {
+      return;
+    }
+    this.abandonedTarget = cleanup;
+    if (!await this.closeTarget(cleanup)) return;
+    try {
+      await this.clearAbandonedStored();
+      if (this.abandonedTarget === cleanup) this.abandonedTarget = undefined;
+    } catch {
+      // The guarded target is closed; retain only non-blocking bookkeeping.
     }
   }
 
@@ -1474,7 +1603,28 @@ export class SurfaceSwitchCoordinator {
     cleanup.transaction.phase = 'target-unidentified';
     cleanup.state = 'marking-closed';
     cleanup.durableMarkerPersisted = false;
-    return this.reconcileDetachedClosedMarker(cleanup);
+    return this.reconcileDetachedAbandonedTarget(cleanup);
+  }
+
+  private async reconcileDetachedAbandonedTarget(
+    cleanup: DetachedTargetCleanup,
+  ): Promise<boolean> {
+    if (cleanup.durableMarker === undefined) {
+      cleanup.durableMarker = this.persistAbandonedDetached(cleanup.transaction).then(
+        () => true,
+        () => false,
+      );
+    }
+    const operation = cleanup.durableMarker;
+    const persisted = await operation;
+    if (cleanup.durableMarker === operation) cleanup.durableMarker = undefined;
+    if (!persisted) {
+      this.scheduleDetachedTargetCleanup(cleanup);
+      return false;
+    }
+    this.abandonedTarget = { ...cleanup.transaction };
+    this.releaseDetachedTargetCleanup(cleanup);
+    return true;
   }
 
   private async reconcileDetachedClosedMarker(
@@ -1564,6 +1714,16 @@ export class SurfaceSwitchCoordinator {
     });
   }
 
+  private persistAbandonedMain(active: ActiveSwitch): Promise<void> {
+    return this.options.storage.set({
+      [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: active.transaction,
+      [SURFACE_SWITCH_STORAGE_KEY]: null,
+      ...(active.ownsDetachedCleanupKey
+        ? { [SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY]: null }
+        : {}),
+    });
+  }
+
   private clearStored(
     active?: ActiveSwitch,
     restoredOwnsDetachedCleanupKey = false,
@@ -1582,9 +1742,22 @@ export class SurfaceSwitchCoordinator {
     });
   }
 
+  private persistAbandonedDetached(transaction: SwitchTransaction): Promise<void> {
+    return this.options.storage.set({
+      [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: transaction,
+      [SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY]: null,
+    });
+  }
+
   private clearDetachedStored(): Promise<void> {
     return this.options.storage.set({
       [SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY]: null,
+    });
+  }
+
+  private clearAbandonedStored(): Promise<void> {
+    return this.options.storage.set({
+      [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: null,
     });
   }
 }

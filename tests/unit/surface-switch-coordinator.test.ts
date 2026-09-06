@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY,
   SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY,
   SURFACE_SWITCH_STORAGE_KEY,
   SurfaceSwitchCoordinator,
@@ -69,6 +70,7 @@ const toFloating = {
   target: 'floating' as const,
   sourceWindowId: 7,
 };
+const ABANDONED_TARGET_KEY = SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY;
 
 describe('SurfaceSwitchCoordinator', () => {
   it('retries a failed restore on admission while keeping that request fail-closed', async () => {
@@ -496,6 +498,7 @@ describe('SurfaceSwitchCoordinator', () => {
         source: 'floating',
         target: 'sidepanel',
         sourceWindowId: 9,
+        sourceIdentity: { hostWindowId: 90, instanceToken: 'live-source' },
         targetIdentity: { hostWindowId: 9 },
       });
 
@@ -530,27 +533,17 @@ describe('SurfaceSwitchCoordinator', () => {
     }
   });
 
-  it('durably abandons an unidentified side-panel target before admitting a fresh retry', async () => {
+  it('closes a late target from a durable non-blocking abandoned tombstone', async () => {
     vi.useFakeTimers();
     try {
-      class RejectFirstClearStorage extends MemoryStorage {
-        rejected = false;
-
-        override async set(items: Record<string, unknown>): Promise<void> {
-          if (items[SURFACE_SWITCH_STORAGE_KEY] === null && !this.rejected) {
-            this.rejected = true;
-            throw new Error('clear unavailable');
-          }
-          await super.set(items);
-        }
-      }
-      const storage = new RejectFirstClearStorage();
+      const storage = new MemoryStorage();
       const operations: SurfaceOperations = {
         openFloating: vi.fn(async () => true),
         openSidePanel: vi.fn(async () => true),
         closeFloating: vi.fn(async () => true),
         closeSidePanel: vi.fn(async () => true),
         saveDisplayMode: vi.fn(async () => {}),
+        isSourceLive: vi.fn(async () => true),
       };
       const coordinator = new SurfaceSwitchCoordinator({
         operations,
@@ -565,16 +558,19 @@ describe('SurfaceSwitchCoordinator', () => {
         source: 'floating',
         target: 'sidepanel',
         sourceWindowId: 9,
+        sourceIdentity: { hostWindowId: 90, instanceToken: 'live-source' },
         targetIdentity: { hostWindowId: 9 },
       });
 
       await vi.advanceTimersByTimeAsync(10);
       await expect(abandoned).resolves.toMatchObject({ reason: 'target-close-failed' });
       await vi.advanceTimersByTimeAsync(20);
-      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+      expect(storage.values.get(ABANDONED_TARGET_KEY)).toMatchObject({
         switchId: 'never-bootstrapped-panel',
         phase: 'target-unidentified',
       });
+      expect(coordinator.isAdmissionBlocked()).toBe(false);
       expect(operations.closeSidePanel).not.toHaveBeenCalled();
 
       const restarted = new SurfaceSwitchCoordinator({
@@ -589,10 +585,49 @@ describe('SurfaceSwitchCoordinator', () => {
         hostWindowId: 9,
         instanceToken: 'old-late-panel',
       })).resolves.toBeUndefined();
-      expect(operations.closeSidePanel).not.toHaveBeenCalled();
-      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+      expect(operations.closeSidePanel).toHaveBeenCalledWith(9, {
+        hostWindowId: 9,
+        instanceToken: 'old-late-panel',
+      });
+      expect(storage.values.get(ABANDONED_TARGET_KEY)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-      const retry = restarted.request({
+  it('lets a fresh transaction claim a late target before abandoned cleanup', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new MemoryStorage();
+      const operations: SurfaceOperations = {
+        openFloating: vi.fn(async () => true),
+        openSidePanel: vi.fn(async () => true),
+        closeFloating: vi.fn(async () => true),
+        closeSidePanel: vi.fn(async () => true),
+        saveDisplayMode: vi.fn(async () => {}),
+        isSourceLive: vi.fn(async () => true),
+      };
+      const coordinator = new SurfaceSwitchCoordinator({
+        operations,
+        storage,
+        now: () => 1_000,
+        timeoutMs: 10,
+        targetCloseRetryDelayMs: 20,
+        targetCloseRetryLimit: 1,
+      });
+      const first = coordinator.request({
+        switchId: 'old-unidentified-target',
+        source: 'floating',
+        target: 'sidepanel',
+        sourceWindowId: 9,
+        sourceIdentity: { hostWindowId: 90, instanceToken: 'old-source' },
+        targetIdentity: { hostWindowId: 9 },
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      await first;
+      await vi.advanceTimersByTimeAsync(20);
+
+      const retry = coordinator.request({
         switchId: 'fresh-panel-retry',
         source: 'floating',
         target: 'sidepanel',
@@ -600,21 +635,59 @@ describe('SurfaceSwitchCoordinator', () => {
         sourceIdentity: { hostWindowId: 90, instanceToken: 'fresh-source' },
         targetIdentity: { hostWindowId: 9 },
       });
-      await vi.waitFor(async () => expect(await restarted.bootstrap('sidepanel', {
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+        switchId: 'fresh-panel-retry',
+        phase: 'awaiting-ready',
+      });
+      await expect(coordinator.bootstrap('sidepanel', {
         hostWindowId: 9,
-        instanceToken: 'fresh-panel',
-      })).toMatchObject({ switchId: 'fresh-panel-retry', phase: 'awaiting-ready' }));
-      await restarted.ready({
+        instanceToken: 'old-late-panel',
+      })).resolves.toMatchObject({ switchId: 'fresh-panel-retry', phase: 'awaiting-ready' });
+      await coordinator.ready({
         switchId: 'fresh-panel-retry',
         surface: 'sidepanel',
         eventWatermark: 0,
-        targetIdentity: { hostWindowId: 9, instanceToken: 'fresh-panel' },
+        targetIdentity: { hostWindowId: 9, instanceToken: 'old-late-panel' },
       });
       await expect(retry).resolves.toMatchObject({ ok: true });
       expect(operations.closeSidePanel).not.toHaveBeenCalled();
+      expect(storage.values.get(ABANDONED_TARGET_KEY)).toBeNull();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('clears an abandoned target without closing it after the source generation is gone', async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(ABANDONED_TARGET_KEY, {
+      switchId: 'source-gone-abandoned',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+      sourceIdentity: { hostWindowId: 90, instanceToken: 'gone-source' },
+      targetIdentity: { hostWindowId: 9 },
+      phase: 'target-unidentified',
+      startedAt: 900,
+    });
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+      isSourceLive: vi.fn(async () => false),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage, now: () => 1_000 });
+
+    await coordinator.restore();
+    expect(coordinator.isAdmissionBlocked()).toBe(false);
+    await expect(coordinator.bootstrap('sidepanel', {
+      hostWindowId: 9,
+      instanceToken: 'manual-panel',
+    })).resolves.toBeUndefined();
+    expect(operations.closeSidePanel).not.toHaveBeenCalled();
+    expect(storage.values.get(ABANDONED_TARGET_KEY)).toBeNull();
   });
 
   it.each(['opening', 'awaiting-ready'] as const)(

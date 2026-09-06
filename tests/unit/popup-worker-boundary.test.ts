@@ -12,6 +12,7 @@ import {
   FloatWindowManager,
 } from '../../src/background/float-window';
 import {
+  SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY,
   SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY,
   SURFACE_SWITCH_STORAGE_KEY,
 } from '../../src/background/surface-switch-coordinator';
@@ -855,13 +856,12 @@ describe('worker boundary: real popup clients against the real listener', () => 
       await expect(first).resolves.toMatchObject({ reason: 'target-close-failed' });
       await vi.advanceTimersByTimeAsync(3_000);
       expect(fake.sessionRecords[SURFACE_SWITCH_STORAGE_KEY]).toBeNull();
+      expect(fake.sessionRecords[SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]).toMatchObject({
+        switchId: 'unbootstrapped-return',
+        phase: 'target-unidentified',
+      });
       expect(fake.sidePanelCloseCalls).toEqual([]);
 
-      await fake.dispatch({
-        protocolVersion: 1,
-        type: 'surface.bootstrap',
-        payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'old-late-panel' },
-      }, POPUP_SENDER);
       const retry = fake.dispatch({
         protocolVersion: 1,
         type: 'pip.returnToSidePanel',
@@ -876,7 +876,7 @@ describe('worker boundary: real popup clients against the real listener', () => 
       await fake.dispatch({
         protocolVersion: 1,
         type: 'surface.bootstrap',
-        payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'fresh-panel' },
+        payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'old-late-panel' },
       }, POPUP_SENDER);
       await fake.dispatch({
         protocolVersion: 1,
@@ -886,11 +886,12 @@ describe('worker boundary: real popup clients against the real listener', () => 
           surface: 'sidepanel',
           eventWatermark: 0,
           windowId: 77,
-          instanceToken: 'fresh-panel',
+          instanceToken: 'old-late-panel',
         },
       }, POPUP_SENDER);
       await expect(retry).resolves.toEqual({ ok: true, switchId: 'fresh-return' });
       expect(fake.sidePanelCloseCalls).toEqual([]);
+      expect(fake.sessionRecords[SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]).toBeNull();
     } finally {
       vi.useRealTimers();
     }
