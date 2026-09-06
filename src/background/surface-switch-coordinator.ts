@@ -53,10 +53,18 @@ export interface SwitchTransaction extends SurfaceSwitchRequest {
     | 'closing-source'
     | 'rolling-back-mode'
     | 'closing-target'
+    | 'target-unidentified'
     | 'target-closed'
     | 'source-closed';
   startedAt: number;
 }
+
+const hasPendingTargetIdentity = (transaction: SwitchTransaction): boolean =>
+  transaction.phase === 'closing-target'
+  && (
+    transaction.targetIdentity === undefined
+    || !hasInstanceToken(transaction.targetIdentity)
+  );
 
 export type SurfaceSwitchResult =
   | { ok: true; switchId: string }
@@ -97,6 +105,7 @@ interface ActiveSwitch {
   modeRollback: Promise<boolean> | undefined;
   targetCleanupTimer: ReturnType<typeof setTimeout> | undefined;
   targetCloseRetriesRemaining: number;
+  pendingIdentityRetriesRemaining: number;
   phasePersistence: Promise<boolean> | undefined;
   phasePersisted: boolean;
   phasePersistRetriesRemaining: number;
@@ -121,6 +130,7 @@ interface DetachedTargetCleanup {
   durableMarkerPersisted: boolean;
   timer: ReturnType<typeof setTimeout> | undefined;
   targetCloseRetriesRemaining: number;
+  pendingIdentityRetriesRemaining: number;
   durableMarkerRetriesRemaining: number;
   durableClearRetriesRemaining: number;
 }
@@ -173,7 +183,11 @@ const isTargetIdentity = (value: unknown, target: unknown, phase: unknown): bool
   const keys = Object.keys(identity);
   if (!Object.hasOwn(identity, 'instanceToken')) {
     return target === 'sidepanel'
-      && (phase === 'opening' || phase === 'closing-target')
+      && (
+        phase === 'opening'
+        || phase === 'closing-target'
+        || phase === 'target-unidentified'
+      )
       && keys.length === 1
       && Number.isInteger(identity.hostWindowId)
       && (identity.hostWindowId as number) >= 0;
@@ -225,6 +239,7 @@ export function parseSwitchTransaction(
       'closing-source',
       'rolling-back-mode',
       'closing-target',
+      'target-unidentified',
       'target-closed',
       'source-closed',
     ].includes(String(item.phase))
@@ -241,7 +256,14 @@ export function parseSwitchTransaction(
       && !hasSourceIdentity
     )
     || (
-      ['opening', 'awaiting-ready', 'closing-source', 'rolling-back-mode', 'closing-target'].includes(
+      [
+        'opening',
+        'awaiting-ready',
+        'closing-source',
+        'rolling-back-mode',
+        'closing-target',
+        'target-unidentified',
+      ].includes(
         String(item.phase),
       )
       && !hasTargetIdentity
@@ -259,6 +281,17 @@ function parseLegacyClosingSourceWithoutTarget(
   if (item.phase !== 'closing-source' || Object.hasOwn(item, TARGET_IDENTITY_KEY)) {
     return undefined;
   }
+  const explicitSourceIdentity = item.sourceIdentity;
+  if (
+    item.target === 'sidepanel'
+    && (
+      !Object.hasOwn(item, SOURCE_IDENTITY_KEY)
+      || typeof explicitSourceIdentity !== 'object'
+      || explicitSourceIdentity === null
+      || Array.isArray(explicitSourceIdentity)
+      || !Object.hasOwn(explicitSourceIdentity, 'sessionId')
+    )
+  ) return undefined;
   const sourceIdentity = Object.hasOwn(item, SOURCE_IDENTITY_KEY)
     ? item.sourceIdentity
     : item.source === 'floating'
@@ -376,12 +409,14 @@ export class SurfaceSwitchCoordinator {
         transaction.phase === 'closing-target'
         || transaction.phase === 'closing-source'
         || transaction.phase === 'rolling-back-mode'
+        || transaction.phase === 'target-unidentified'
         || transaction.phase === 'target-closed'
         || transaction.phase === 'source-closed'
         || this.now() - transaction.startedAt < this.timeoutMs
       );
     if (
       (detachedTransaction?.phase === 'closing-target'
+        || detachedTransaction?.phase === 'target-unidentified'
         || detachedTransaction?.phase === 'target-closed'
         || detachedTransaction?.phase === 'source-closed')
       && !mainOwnsDetached
@@ -410,6 +445,7 @@ export class SurfaceSwitchCoordinator {
         transaction.phase !== 'closing-target'
         && transaction.phase !== 'closing-source'
         && transaction.phase !== 'rolling-back-mode'
+        && transaction.phase !== 'target-unidentified'
         && transaction.phase !== 'target-closed'
         && transaction.phase !== 'source-closed'
         && this.now() - transaction.startedAt >= this.timeoutMs
@@ -439,6 +475,7 @@ export class SurfaceSwitchCoordinator {
       transaction.phase === 'closing-target'
       || transaction.phase === 'closing-source'
       || transaction.phase === 'rolling-back-mode'
+      || transaction.phase === 'target-unidentified'
       || transaction.phase === 'target-closed'
       || transaction.phase === 'source-closed'
     ) {
@@ -446,13 +483,7 @@ export class SurfaceSwitchCoordinator {
       this.active = active;
       this.restored = undefined;
       this.restoredOwnsDetachedCleanupKey = false;
-      if (
-        transaction.phase !== 'closing-target'
-        || (
-          transaction.targetIdentity !== undefined
-          && hasInstanceToken(transaction.targetIdentity)
-        )
-      ) this.scheduleTargetCleanup(active);
+      this.scheduleTargetCleanup(active);
       return transaction;
     }
     this.restored = transaction;
@@ -520,7 +551,12 @@ export class SurfaceSwitchCoordinator {
       transaction.targetIdentity = { ...identity };
       try {
         await this.persist(transaction);
+        if (this.active?.transaction === transaction) {
+          clearTimeout(this.active.targetCleanupTimer);
+          this.active.targetCleanupTimer = undefined;
+        }
       } catch {
+        transaction.targetIdentity = expectedIdentity;
         return transaction;
       }
     }
@@ -530,6 +566,7 @@ export class SurfaceSwitchCoordinator {
         transaction.phase === 'closing-target'
         || transaction.phase === 'closing-source'
         || transaction.phase === 'rolling-back-mode'
+        || transaction.phase === 'target-unidentified'
         || transaction.phase === 'target-closed'
         || transaction.phase === 'source-closed'
       )
@@ -720,6 +757,7 @@ export class SurfaceSwitchCoordinator {
       modeRollback: undefined,
       targetCleanupTimer: undefined,
       targetCloseRetriesRemaining: this.targetCloseRetryLimit,
+      pendingIdentityRetriesRemaining: this.targetCloseRetryLimit,
       phasePersistence: undefined,
       phasePersisted: false,
       phasePersistRetriesRemaining: this.targetCloseRetryLimit,
@@ -755,6 +793,7 @@ export class SurfaceSwitchCoordinator {
       modeRollback: undefined,
       targetCleanupTimer: undefined,
       targetCloseRetriesRemaining: this.targetCloseRetryLimit,
+      pendingIdentityRetriesRemaining: this.targetCloseRetryLimit,
       phasePersistence: undefined,
       phasePersisted: true,
       phasePersistRetriesRemaining: this.targetCloseRetryLimit,
@@ -762,7 +801,9 @@ export class SurfaceSwitchCoordinator {
       durableMarker: undefined,
       durableClear: undefined,
       durableMarkerPersisted:
-        transaction.phase === 'target-closed' || transaction.phase === 'source-closed',
+        transaction.phase === 'target-unidentified'
+        || transaction.phase === 'target-closed'
+        || transaction.phase === 'source-closed',
       durableMarkerRetriesRemaining: this.targetCloseRetryLimit,
       durableClearRetriesRemaining: this.targetCloseRetryLimit,
       ownsDetachedCleanupKey,
@@ -1171,14 +1212,30 @@ export class SurfaceSwitchCoordinator {
   }
 
   private scheduleTargetCleanup(active: ActiveSwitch): void {
-    if (
-      active.transaction.phase === 'closing-target'
-      && (
-        active.transaction.targetIdentity === undefined
-        || !hasInstanceToken(active.transaction.targetIdentity)
-      )
-    ) return;
+    if (hasPendingTargetIdentity(active.transaction)) {
+      if (
+        this.active !== active
+        || active.targetCleanupTimer !== undefined
+      ) return;
+      if (active.pendingIdentityRetriesRemaining <= 0) {
+        void this.markMainTargetUnidentified(active);
+        return;
+      }
+      active.pendingIdentityRetriesRemaining -= 1;
+      active.targetCleanupTimer = setTimeout(() => {
+        active.targetCleanupTimer = undefined;
+        if (hasPendingTargetIdentity(active.transaction)) {
+          if (active.pendingIdentityRetriesRemaining <= 0) {
+            void this.markMainTargetUnidentified(active);
+          } else {
+            this.scheduleTargetCleanup(active);
+          }
+        }
+      }, this.targetCloseRetryDelayMs);
+      return;
+    }
     const durablePhase = active.transaction.phase === 'target-closed'
+      || active.transaction.phase === 'target-unidentified'
       || active.transaction.phase === 'source-closed';
     const retriesRemaining = durablePhase
       ? active.durableMarkerPersisted
@@ -1213,6 +1270,7 @@ export class SurfaceSwitchCoordinator {
     if (this.active !== active) return true;
     if (
       active.transaction.phase === 'target-closed'
+      || active.transaction.phase === 'target-unidentified'
       || active.transaction.phase === 'source-closed'
     ) {
       return this.reconcileDurableTargetCleanup(
@@ -1264,6 +1322,12 @@ export class SurfaceSwitchCoordinator {
     return this.reconcileTargetCleanup(active);
   }
 
+  private markMainTargetUnidentified(active: ActiveSwitch): Promise<boolean> {
+    active.transaction.phase = 'target-unidentified';
+    active.durableMarkerPersisted = false;
+    return this.reconcileTargetCleanup(active);
+  }
+
   private markMainSourceClosed(active: ActiveSwitch): Promise<boolean> {
     active.transaction.phase = 'source-closed';
     active.durableMarkerPersisted = false;
@@ -1295,19 +1359,35 @@ export class SurfaceSwitchCoordinator {
       durableMarkerPersisted,
       timer: undefined,
       targetCloseRetriesRemaining: this.targetCloseRetryLimit,
+      pendingIdentityRetriesRemaining: this.targetCloseRetryLimit,
       durableMarkerRetriesRemaining: this.targetCloseRetryLimit,
       durableClearRetriesRemaining: this.targetCloseRetryLimit,
     };
   }
 
   private scheduleDetachedTargetCleanup(cleanup: DetachedTargetCleanup): void {
-    if (
-      cleanup.state === 'cleanup'
-      && (
-        cleanup.transaction.targetIdentity === undefined
-        || !hasInstanceToken(cleanup.transaction.targetIdentity)
-      )
-    ) return;
+    if (cleanup.state === 'cleanup' && hasPendingTargetIdentity(cleanup.transaction)) {
+      if (
+        this.detachedTargetCleanup !== cleanup
+        || cleanup.timer !== undefined
+      ) return;
+      if (cleanup.pendingIdentityRetriesRemaining <= 0) {
+        void this.markDetachedTargetUnidentified(cleanup);
+        return;
+      }
+      cleanup.pendingIdentityRetriesRemaining -= 1;
+      cleanup.timer = setTimeout(() => {
+        cleanup.timer = undefined;
+        if (hasPendingTargetIdentity(cleanup.transaction)) {
+          if (cleanup.pendingIdentityRetriesRemaining <= 0) {
+            void this.markDetachedTargetUnidentified(cleanup);
+          } else {
+            this.scheduleDetachedTargetCleanup(cleanup);
+          }
+        }
+      }, this.targetCloseRetryDelayMs);
+      return;
+    }
     const retriesRemaining = cleanup.state === 'clearing'
       ? cleanup.durableClearRetriesRemaining
       : cleanup.state === 'marking-closed'
@@ -1374,6 +1454,8 @@ export class SurfaceSwitchCoordinator {
     cleanup.transaction.targetIdentity = { ...identity };
     try {
       await this.persistDetached(cleanup.transaction);
+      clearTimeout(cleanup.timer);
+      cleanup.timer = undefined;
       return true;
     } catch {
       cleanup.transaction.targetIdentity = expected;
@@ -1383,6 +1465,13 @@ export class SurfaceSwitchCoordinator {
 
   private markDetachedTargetClosed(cleanup: DetachedTargetCleanup): Promise<boolean> {
     cleanup.transaction.phase = 'target-closed';
+    cleanup.state = 'marking-closed';
+    cleanup.durableMarkerPersisted = false;
+    return this.reconcileDetachedClosedMarker(cleanup);
+  }
+
+  private markDetachedTargetUnidentified(cleanup: DetachedTargetCleanup): Promise<boolean> {
+    cleanup.transaction.phase = 'target-unidentified';
     cleanup.state = 'marking-closed';
     cleanup.durableMarkerPersisted = false;
     return this.reconcileDetachedClosedMarker(cleanup);

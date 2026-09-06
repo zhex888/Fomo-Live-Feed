@@ -821,6 +821,81 @@ describe('worker boundary: real popup clients against the real listener', () => 
     expect(fake.sidePanelOpenCalls).toEqual([]);
   });
 
+  it('admits a fresh return after an unbootstrapped side-panel target expires', async () => {
+    const fake = await startWorker({
+      initialFloatWindowId: 900,
+      initialSession: {
+        [FLOAT_WINDOW_ID_SESSION_KEY]: 900,
+        [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+        [PIP_SESSION_STORAGE_KEY]: {
+          sessionId: 'pip-unidentified-target',
+          hostWindowId: 900,
+          phase: 'ready',
+        },
+      },
+    });
+    vi.useFakeTimers();
+    try {
+      await fake.dispatch({
+        protocolVersion: 1,
+        type: 'surface.bootstrap',
+        payload: { surface: 'floating', windowId: 900, instanceToken: 'floating-source' },
+      }, POPUP_SENDER);
+      const first = fake.dispatch({
+        protocolVersion: 1,
+        type: 'pip.returnToSidePanel',
+        payload: {
+          sessionId: 'pip-unidentified-target',
+          hostWindowId: 900,
+          ownerWindowId: 77,
+          switchId: 'unbootstrapped-return',
+        },
+      }, floatHostSender(900));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(first).resolves.toMatchObject({ reason: 'target-close-failed' });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(fake.sessionRecords[SURFACE_SWITCH_STORAGE_KEY]).toBeNull();
+      expect(fake.sidePanelCloseCalls).toEqual([]);
+
+      await fake.dispatch({
+        protocolVersion: 1,
+        type: 'surface.bootstrap',
+        payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'old-late-panel' },
+      }, POPUP_SENDER);
+      const retry = fake.dispatch({
+        protocolVersion: 1,
+        type: 'pip.returnToSidePanel',
+        payload: {
+          sessionId: 'pip-unidentified-target',
+          hostWindowId: 900,
+          ownerWindowId: 77,
+          switchId: 'fresh-return',
+        },
+      }, floatHostSender(900));
+      expect(fake.sidePanelOpenCalls).toEqual([77, 77]);
+      await fake.dispatch({
+        protocolVersion: 1,
+        type: 'surface.bootstrap',
+        payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'fresh-panel' },
+      }, POPUP_SENDER);
+      await fake.dispatch({
+        protocolVersion: 1,
+        type: 'surface.ready',
+        payload: {
+          switchId: 'fresh-return',
+          surface: 'sidepanel',
+          eventWatermark: 0,
+          windowId: 77,
+          instanceToken: 'fresh-panel',
+        },
+      }, POPUP_SENDER);
+      await expect(retry).resolves.toEqual({ ok: true, switchId: 'fresh-return' });
+      expect(fake.sidePanelCloseCalls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('rejects a stale return token before opening the side panel', async () => {
     const fake = await startWorker();
     const host = await fake.dispatch(
