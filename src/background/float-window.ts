@@ -226,18 +226,12 @@ export class FloatWindowManager {
   private async openOrFocusWithOwnerOnce(
     ownerWindowId: number | undefined,
   ): Promise<OpenFloatWindowResult> {
-    if (ownerWindowId !== undefined && Number.isInteger(ownerWindowId) && ownerWindowId >= 0) {
-      try {
-        await this.storage.session.set({
-          [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: ownerWindowId,
-        });
-        this.ownerWindowIdCache = ownerWindowId;
-      } catch {
-        return { ok: false, reason: 'chrome-api-failed' };
-      }
-    }
-
-    return this.openOrFocusOnce();
+    const nextOwnerWindowId = ownerWindowId !== undefined
+      && Number.isInteger(ownerWindowId)
+      && ownerWindowId >= 0
+      ? ownerWindowId
+      : undefined;
+    return this.openOrFocusOnce(nextOwnerWindowId);
   }
 
   async ownerWindowId(): Promise<number | undefined> {
@@ -584,13 +578,20 @@ export class FloatWindowManager {
     return true;
   }
 
-  private async openOrFocusOnce(): Promise<OpenFloatWindowResult> {
+  private async openOrFocusOnce(
+    nextOwnerWindowId: number | undefined,
+  ): Promise<OpenFloatWindowResult> {
     const existingId = await this.readSessionWindowId();
 
     if (existingId !== undefined) {
       try {
         const snapshot = await this.chrome.windows.get(existingId);
         if (snapshot.id !== undefined) {
+          try {
+            await this.ownerWindowId();
+          } catch {
+            return { ok: false, reason: 'chrome-api-failed' };
+          }
           await this.chrome.windows.update(existingId, { focused: true });
           return { ok: true, windowId: existingId, created: false };
         }
@@ -600,6 +601,17 @@ export class FloatWindowManager {
       }
 
       await this.clearSessionWindowId();
+    }
+
+    if (nextOwnerWindowId !== undefined) {
+      try {
+        await this.storage.session.set({
+          [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: nextOwnerWindowId,
+        });
+        this.ownerWindowIdCache = nextOwnerWindowId;
+      } catch {
+        return { ok: false, reason: 'chrome-api-failed' };
+      }
     }
 
     const geometry = await this.readGeometry();

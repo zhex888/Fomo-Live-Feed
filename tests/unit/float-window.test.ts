@@ -603,6 +603,62 @@ describe('FloatWindowManager owner window', () => {
     await expect(manager.ownerWindowId()).resolves.toBe(88);
     expect(manager.cachedOwnerWindowId()).toBe(88);
   });
+
+  it('preserves the original owner when another browser window focuses the live host', async () => {
+    const harness = createHarness();
+    const opened = await harness.manager.openOrFocus(77);
+    if (!opened.ok) throw new Error('expected open');
+    await harness.manager.registerPipOpened(opened.windowId, 'pip-original-owner');
+
+    await expect(harness.manager.openOrFocus(88)).resolves.toEqual({
+      ok: true,
+      windowId: opened.windowId,
+      created: false,
+    });
+
+    expect(harness.createCalls).toHaveLength(1);
+    expect(harness.session.snapshot()[FLOAT_OWNER_WINDOW_ID_SESSION_KEY]).toBe(77);
+    expect(harness.manager.cachedPipReturnContextMatches(
+      opened.windowId,
+      'pip-original-owner',
+      77,
+    )).toBe(true);
+  });
+
+  it('restores the original owner when another browser window focuses the host after restart', async () => {
+    const harness = createHarness();
+    const opened = await harness.manager.openOrFocus(77);
+    if (!opened.ok) throw new Error('expected open');
+    await harness.manager.registerPipOpened(opened.windowId, 'pip-after-restart');
+
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(restartedManager.cachedPipReturnContextMatches(
+      opened.windowId,
+      'pip-after-restart',
+      77,
+    )).toBe(true);
+
+    await expect(restartedManager.openOrFocus(88)).resolves.toEqual({
+      ok: true,
+      windowId: opened.windowId,
+      created: false,
+    });
+
+    expect(harness.createCalls).toHaveLength(1);
+    expect(harness.session.snapshot()[FLOAT_OWNER_WINDOW_ID_SESSION_KEY]).toBe(77);
+    expect(restartedManager.cachedPipReturnContextMatches(
+      opened.windowId,
+      'pip-after-restart',
+      77,
+    )).toBe(true);
+  });
 });
 
 describe('FloatWindowManager PiP session', () => {

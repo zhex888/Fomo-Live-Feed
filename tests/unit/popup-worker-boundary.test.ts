@@ -138,7 +138,7 @@ interface FakeBrowser {
     setBadgeText(details: { text: string }): Promise<void>;
     setBadgeBackgroundColor(details: { color: string }): Promise<void>;
     onClicked: {
-      addListener(listener: () => void): void;
+      addListener(listener: (tab: { windowId?: number }) => void): void;
     };
   };
 }
@@ -170,6 +170,7 @@ function createFakeBrowser(options: {
     left?: number;
     top?: number;
   }) => void) | null = null;
+  let actionClickedListener: ((tab: { windowId?: number }) => void) | null = null;
   let floatWindowId: number | undefined = options.initialFloatWindowId;
   let hydrationGate: Promise<void> | undefined;
   let releaseHydrationGate: (() => void) | undefined;
@@ -318,7 +319,9 @@ function createFakeBrowser(options: {
         badgeCalls.push({ color: details.color });
       },
       onClicked: {
-        addListener(): void {},
+        addListener(fn): void {
+          actionClickedListener = fn;
+        },
       },
     },
   };
@@ -351,6 +354,7 @@ function createFakeBrowser(options: {
     removeTab: (tabId: number): void => removedListener?.(tabId),
     updateTabUrl: (tabId: number, url: string): void => updatedListener?.(tabId, { url }),
     startTabNavigation: (tabId: number): void => updatedListener?.(tabId, { status: 'loading' }),
+    clickAction: (windowId: number): void => actionClickedListener?.({ windowId }),
     changeWindowBounds: (window: {
       id?: number;
       width?: number;
@@ -813,6 +817,84 @@ describe('worker boundary: real popup clients against the real listener', () => 
       payload: { switchId: 'switch-after-restart', surface: 'sidepanel', eventWatermark: 2 },
     }, POPUP_SENDER);
     await expect(returned).resolves.toEqual({ ok: true, switchId: 'switch-after-restart' });
+  });
+
+  it('keeps the original PiP return owner when other browser windows click the action', async () => {
+    const fake = await startWorker();
+    const toFloating = fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.switch.request',
+      payload: {
+        switchId: 'switch-cross-window',
+        source: 'sidepanel',
+        target: 'floating',
+        sourceWindowId: 77,
+      },
+    }, POPUP_SENDER);
+    await vi.waitFor(() => expect(fake.healthChanges).toContainEqual({
+      protocolVersion: 1,
+      type: 'surface.switch.started',
+      payload: { switchId: 'switch-cross-window', target: 'floating' },
+    }));
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.ready',
+      payload: { switchId: 'switch-cross-window', surface: 'floating', eventWatermark: 1 },
+    }, POPUP_SENDER);
+    await toFloating;
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.opened',
+      payload: { sessionId: 'pip-cross-window', hostWindowId: 900 },
+    }, floatHostSender(900));
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.ready',
+      payload: { sessionId: 'pip-cross-window', hostWindowId: 900, eventWatermark: 1 },
+    }, floatHostSender(900));
+
+    fake.navigationCalls.splice(0);
+    fake.clickAction(88);
+    await vi.waitFor(() => expect(fake.navigationCalls).toContainEqual({
+      action: 'focus',
+      windowId: 900,
+      update: { focused: true },
+    }));
+    expect(fake.sessionRecords[FLOAT_OWNER_WINDOW_ID_SESSION_KEY]).toBe(77);
+
+    workerSetup?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fake.clickAction(99);
+    await vi.waitFor(() => expect(fake.navigationCalls.filter((call) => (
+      typeof call === 'object'
+      && call !== null
+      && 'action' in call
+      && call.action === 'focus'
+    ))).toHaveLength(2));
+    expect(fake.sessionRecords[FLOAT_OWNER_WINDOW_ID_SESSION_KEY]).toBe(77);
+
+    const returned = fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.returnToSidePanel',
+      payload: {
+        sessionId: 'pip-cross-window',
+        hostWindowId: 900,
+        ownerWindowId: 77,
+        switchId: 'return-cross-window',
+      },
+    }, floatHostSender(900));
+    expect(fake.sidePanelOpenCalls).toEqual([77]);
+    await vi.waitFor(() => expect(fake.healthChanges).toContainEqual({
+      protocolVersion: 1,
+      type: 'surface.switch.started',
+      payload: { switchId: 'return-cross-window', target: 'sidepanel' },
+    }));
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.ready',
+      payload: { switchId: 'return-cross-window', surface: 'sidepanel', eventWatermark: 2 },
+    }, POPUP_SENDER);
+    await expect(returned).resolves.toEqual({ ok: true, switchId: 'return-cross-window' });
   });
 
   it('opens a trusted cold return synchronously while lifecycle hydration is blocked', async () => {
