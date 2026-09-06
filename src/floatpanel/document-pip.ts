@@ -52,6 +52,10 @@ export class DocumentPipController {
   ) {}
 
   activate(): Promise<PipActivationResult> {
+    if (this.inFlight !== null) {
+      return this.inFlight;
+    }
+
     if (!supportsDocumentPip(this.api)) {
       return Promise.resolve({ ok: false, reason: 'unsupported' });
     }
@@ -60,10 +64,6 @@ export class DocumentPipController {
     if (liveWindow !== null) {
       this.observePageHide(liveWindow);
       return Promise.resolve({ ok: true, pipWindow: liveWindow, reused: true });
-    }
-
-    if (this.inFlight !== null) {
-      return this.inFlight;
     }
 
     let request: Promise<Window>;
@@ -126,12 +126,16 @@ export class DocumentPipController {
   }
 
   private setupDocument(pipDocument: Document): HTMLElement {
-    for (const style of this.hostDocument.querySelectorAll('style')) {
-      pipDocument.head.append(style.cloneNode(true));
-    }
+    const styleNodes = this.hostDocument.head.querySelectorAll(
+      'style, link[rel~="stylesheet"]',
+    );
+    for (const node of styleNodes) {
+      if (node.tagName === 'STYLE') {
+        pipDocument.head.append(node.cloneNode(true));
+        continue;
+      }
 
-    for (const link of this.hostDocument.querySelectorAll('link[rel~="stylesheet"]')) {
-      const href = link.getAttribute('href');
+      const href = node.getAttribute('href');
       if (href === null) {
         continue;
       }
@@ -141,7 +145,7 @@ export class DocumentPipController {
         continue;
       }
 
-      const clone = link.cloneNode(true) as HTMLLinkElement;
+      const clone = node.cloneNode(true) as HTMLLinkElement;
       clone.href = resolvedHref;
       pipDocument.head.append(clone);
     }

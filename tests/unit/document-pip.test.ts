@@ -99,6 +99,40 @@ describe('DocumentPipController.activate', () => {
     expect(requestWindow).toHaveBeenCalledTimes(1);
   });
 
+  it('reuses in-flight activation before an API window exposed synchronously', async () => {
+    const { pipWindow } = createPipWindow();
+    let apiWindow: Window | null = null;
+    let releaseMount: (() => void) | undefined;
+    const mountGate = new Promise<void>((resolve) => {
+      releaseMount = resolve;
+    });
+    const api: DocumentPictureInPictureLike = {
+      get window() {
+        return apiWindow;
+      },
+      requestWindow: vi.fn(() => {
+        apiWindow = pipWindow;
+        return Promise.resolve(pipWindow);
+      }),
+    };
+    const controller = new DocumentPipController(document, api, {
+      width: 400,
+      height: 600,
+      mount: () => mountGate,
+    });
+
+    const first = controller.activate();
+    const concurrent = controller.activate();
+
+    expect(concurrent).toBe(first);
+    releaseMount?.();
+    await expect(concurrent).resolves.toEqual({
+      ok: true,
+      pipWindow,
+      reused: false,
+    });
+  });
+
   it('clones only inline and same-origin packaged styles into the PiP document', async () => {
     const host = document.implementation.createHTMLDocument();
     const base = host.createElement('base');
@@ -137,6 +171,45 @@ describe('DocumentPipController.activate', () => {
     expect(copiedStyle).not.toBe(style);
     expect(copiedStyle?.textContent).toBe(style.textContent);
     expect(pipDocument.head.querySelector('script')).toBeNull();
+  });
+
+  it('preserves the host order of interleaved eligible style nodes', async () => {
+    const host = document.implementation.createHTMLDocument();
+    const base = host.createElement('base');
+    base.href = 'chrome-extension://extension-id/sidepanel.html';
+    const firstStyle = host.createElement('style');
+    firstStyle.dataset.order = 'first';
+    const packagedLink = host.createElement('link');
+    packagedLink.rel = 'stylesheet';
+    packagedLink.href = 'styles/app.css';
+    packagedLink.dataset.order = 'second';
+    const externalLink = host.createElement('link');
+    externalLink.rel = 'stylesheet';
+    externalLink.href = 'https://cdn.example.com/app.css';
+    externalLink.dataset.order = 'filtered';
+    const lastStyle = host.createElement('style');
+    lastStyle.dataset.order = 'third';
+    host.head.append(
+      base,
+      firstStyle,
+      packagedLink,
+      externalLink,
+      lastStyle,
+    );
+    const { pipWindow, pipDocument } = createPipWindow();
+    const controller = new DocumentPipController(
+      host,
+      createApi(() => Promise.resolve(pipWindow)),
+      { width: 400, height: 600 },
+    );
+
+    await controller.activate();
+
+    expect(
+      [...pipDocument.head.querySelectorAll('style, link')].map(
+        (node) => (node as HTMLElement).dataset.order,
+      ),
+    ).toEqual(['first', 'second', 'third']);
   });
 
   it('ignores stylesheet links whose URL cannot be parsed', async () => {
