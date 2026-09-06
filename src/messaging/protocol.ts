@@ -654,6 +654,11 @@ const KNOWN_MESSAGE_TYPES = [
   'translation.hostReady',
 ] as const satisfies readonly ExtensionMessage['type'][];
 
+type AssertNever<T extends never> = T;
+type _KnownMessageTypesAreExhaustive = AssertNever<
+  Exclude<ExtensionMessage['type'], (typeof KNOWN_MESSAGE_TYPES)[number]>
+>;
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
