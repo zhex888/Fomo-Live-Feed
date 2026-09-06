@@ -1,4 +1,8 @@
-import { parseExtensionMessage, PROTOCOL_VERSION } from '../messaging/protocol';
+import {
+  parseExtensionMessage,
+  PROTOCOL_VERSION,
+  type ExtensionMessage,
+} from '../messaging/protocol';
 import { readBrowserTranslationEnv } from './browser-translation';
 import {
   ContentTranslationService,
@@ -35,10 +39,10 @@ export function installContentTranslationHost(runtime: ContentTranslationRuntime
     },
   });
 
-  const listener = async (raw: unknown): Promise<ContentTranslationReply | undefined> => {
-    const parsed = parseExtensionMessage(raw);
-    if (!parsed.ok || parsed.message.type !== 'translation.request') return undefined;
-    const command = parsed.message.payload;
+  const handleCommand = async (
+    message: Extract<ExtensionMessage, { type: 'translation.request' }>,
+  ): Promise<ContentTranslationReply> => {
+    const command = message.payload;
     clientId = command.clientId;
     try {
       switch (command.command) {
@@ -63,6 +67,11 @@ export function installContentTranslationHost(runtime: ContentTranslationRuntime
         error: { code: error instanceof ContentTranslationServiceError ? error.code : 'translation-failed' },
       };
     }
+  };
+  const listener = (raw: unknown): Promise<ContentTranslationReply> | undefined => {
+    const parsed = parseExtensionMessage(raw);
+    if (!parsed.ok || parsed.message.type !== 'translation.request') return undefined;
+    return handleCommand(parsed.message);
   };
 
   const gesture = (): void => service.handleTrustedGesture();
