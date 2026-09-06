@@ -14,6 +14,7 @@ export type PipActivationResult =
 export interface DocumentPipControllerOptions {
   width: number;
   height: number;
+  getGeometry?: () => { width: number; height: number };
   title?: string;
   lang?: string;
   colorScheme?: string;
@@ -68,9 +69,10 @@ export class DocumentPipController {
 
     let request: Promise<Window>;
     try {
+      const geometry = this.options.getGeometry?.() ?? this.options;
       request = this.api.requestWindow({
-        width: this.options.width,
-        height: this.options.height,
+        width: geometry.width,
+        height: geometry.height,
         disallowReturnToOpener: true,
       });
     } catch (error) {

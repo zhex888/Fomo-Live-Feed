@@ -12,6 +12,13 @@ import {
   type DocumentPictureInPictureLike,
 } from './document-pip';
 import { mountPipFeedRoot, type PipFeedRootOptions } from './PipFeedRoot';
+import {
+  DEFAULT_PIP_GEOMETRY,
+  observePipGeometry,
+  readPipGeometry,
+  type PipGeometry,
+} from './pip-geometry';
+import { useSurfaceTheme } from './use-surface-theme';
 
 export type FloatingHostState =
   | 'activation'
@@ -126,6 +133,8 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   const [childMayBeLive, setChildMayBeLive] = useState(false);
   const [childOwnsRead, setChildOwnsRead] = useState(false);
   const [activationPending, setActivationPending] = useState(false);
+  const theme = useSurfaceTheme(deps);
+  const pipGeometryRef = useRef<PipGeometry>({ ...DEFAULT_PIP_GEOMETRY });
   const sessionRef = useRef<ActiveSession | undefined>(undefined);
   const activationInFlightRef = useRef(false);
   const mountedRef = useRef(true);
@@ -142,6 +151,14 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     trackAcknowledgement: true,
     now: deps.now,
   });
+
+  useEffect(() => {
+    let disposed = false;
+    void readPipGeometry(deps.storage.local).then((geometry) => {
+      if (!disposed) pipGeometryRef.current = geometry;
+    }).catch(() => {});
+    return () => { disposed = true; };
+  }, [deps.storage.local]);
   const finalizeSession = (
     session: ActiveSession,
     reason: 'native-close' | 'mount-failed',
@@ -197,6 +214,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     {
       width: 380,
       height: 600,
+      getGeometry: () => pipGeometryRef.current,
       title: translate('header.title'),
       lang: props.hostDocument?.documentElement.lang ?? document.documentElement.lang,
       bodyClass: 'floatpanel-body pip-body',
@@ -265,59 +283,82 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
           if (mountedRef.current) {
             flushSync(() => setChildOwnsRead(true));
           }
-          session.cleanup = mount({
-            root,
-            deps,
-            onFeedReady: (eventWatermark) => {
-              if (
-                sessionRef.current !== session
-                || session.terminal
-                || session.readyInFlight
-                || pipWindow.closed
-              ) return;
-              session.readyInFlight = true;
-              void deps.runtime.sendMessage({
-                protocolVersion: 1,
-                type: 'pip.ready',
-                payload: { sessionId: session.id, hostWindowId, eventWatermark },
-              }).then((response) => {
+          const stopGeometryObserver = observePipGeometry(
+            pipWindow,
+            deps.storage.local,
+            (geometry) => { pipGeometryRef.current = geometry; },
+          );
+          let cleanupFeed: (() => void) | undefined;
+          session.cleanup = () => {
+            stopGeometryObserver();
+            cleanupFeed?.();
+            cleanupFeed = undefined;
+          };
+          try {
+            cleanupFeed = mount({
+              root,
+              deps,
+              onFeedReady: (eventWatermark) => {
                 if (
-                  mountedRef.current
-                  && sessionRef.current === session
-                  && !session.terminal
-                  && !pipWindow.closed
-                  && isReadyResponse(response)
+                  sessionRef.current !== session
+                  || session.terminal
+                  || session.readyInFlight
+                  || pipWindow.closed
+                ) return;
+                session.readyInFlight = true;
+                void deps.runtime.sendMessage({
+                  protocolVersion: 1,
+                  type: 'pip.ready',
+                  payload: { sessionId: session.id, hostWindowId, eventWatermark },
+                }).then((response) => {
+                  if (
+                    mountedRef.current
+                    && sessionRef.current === session
+                    && !session.terminal
+                    && !pipWindow.closed
+                    && isReadyResponse(response)
+                  ) {
+                    setState('active');
+                    return;
+                  }
+                  session.readyInFlight = false;
+                  handleReadyFailure();
+                }).catch(() => {
+                  handleReadyFailure();
+                });
+              },
+              onReturnToSidePanel: async () => {
+                if (
+                  sessionRef.current !== session
+                  || session.terminal
+                  || pipWindow.closed
+                  || session.ownerWindowId === undefined
                 ) {
-                  setState('active');
-                  return;
+                  return false;
                 }
-                session.readyInFlight = false;
-                handleReadyFailure();
-              }).catch(() => {
-                handleReadyFailure();
-              });
-            },
-            onReturnToSidePanel: async () => {
-              if (
-                sessionRef.current !== session
-                || session.terminal
-                || pipWindow.closed
-                || session.ownerWindowId === undefined
-              ) {
-                return false;
-              }
-              try {
-                const result = await surfaceSwitchClient.returnToSidePanel(
-                  session.id,
-                  hostWindowId,
-                  session.ownerWindowId,
-                );
-                return result.ok;
-              } catch {
-                return false;
-              }
-            },
-          });
+                try {
+                  const result = await surfaceSwitchClient.returnToSidePanel(
+                    session.id,
+                    hostWindowId,
+                    session.ownerWindowId,
+                  );
+                  return result.ok;
+                } catch {
+                  return false;
+                }
+              },
+            });
+          } catch (error) {
+            if (!session.cleanupDone) {
+              session.cleanup?.();
+              delete session.cleanup;
+            }
+            throw error;
+          }
+          if (session.cleanupDone) {
+            cleanupFeed();
+            cleanupFeed = undefined;
+          }
         } catch (error) {
           session.failureReason = 'mount-failed';
           finalizeSession(session, 'mount-failed', 'error');
@@ -384,7 +425,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     && !(state === 'error' && childMayBeLive);
 
   return (
-    <div className="floating-surface-host" data-state={state}>
+    <div className="floating-surface-host" data-state={state} data-theme={theme}>
       {showFeed && (
         <SidePanelApp deps={{ ...deps, readEnabled: !childOwnsRead }} />
       )}

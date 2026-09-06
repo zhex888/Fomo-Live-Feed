@@ -24,6 +24,32 @@ body {
   min-width: 320px;
 }
 
+.floating-surface-host,
+.pip-feed-root {
+  --ui-canvas: #090d13;
+  --ui-raised: #0d131c;
+  --ui-control: #121a25;
+  --ui-text: #f3f7ff;
+  --ui-text-muted: #8997aa;
+  --ui-rule: #202b39;
+  --event-buy: #31d399;
+  --event-sell: #f16d79;
+  --event-thesis: #7ea7ff;
+}
+
+.floating-surface-host[data-theme='light'],
+.pip-feed-root[data-theme='light'] {
+  --ui-canvas: #f4f6f9;
+  --ui-raised: #ffffff;
+  --ui-control: #eef2f6;
+  --ui-text: #121923;
+  --ui-text-muted: #5d697a;
+  --ui-rule: #d8dee7;
+  --event-buy: #087f5b;
+  --event-sell: #c92a3a;
+  --event-thesis: #315fbd;
+}
+
 .floating-surface-host {
   position: relative;
   width: 100%;

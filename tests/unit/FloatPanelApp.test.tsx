@@ -22,6 +22,11 @@ import {
   type PipFeedRootOptions,
 } from '../../src/floatpanel/PipFeedRoot';
 import type { DocumentPictureInPictureLike } from '../../src/floatpanel/document-pip';
+import {
+  PIP_GEOMETRY_STORAGE_KEY,
+} from '../../src/floatpanel/pip-geometry';
+import { DEFAULT_SETTINGS } from '../../src/domain/settings';
+import { SETTINGS_STORAGE_KEY } from '../../src/storage/local-preferences';
 
 // Same locale stub as SidePanelApp.test.tsx: synchronous EN catalog so the
 // render path does not depend on the real LocaleProvider's async locale load.
@@ -136,6 +141,10 @@ function createHarness(surface: 'sidepanel' | 'floatpanel' | 'pip') {
 
   return {
     deps,
+    readStored: (key: string) => storageRecords[key],
+    seedStored: (key: string, value: unknown) => {
+      storageRecords[key] = value;
+    },
     geometryMessages: () =>
       sentMessages.filter(
         (message) => (message as { type?: string }).type === 'float.geometryChanged',
@@ -168,6 +177,7 @@ function createPipWindow(): PipWindowHarness {
     }),
     addEventListener: events.addEventListener.bind(events),
     removeEventListener: events.removeEventListener.bind(events),
+    dispatchEvent: events.dispatchEvent.bind(events),
   } as unknown as Window;
 
   return {
@@ -248,6 +258,105 @@ describe('SidePanelApp float surface', () => {
 });
 
 describe('FloatingSurfaceHost', () => {
+  it('uses the persisted PiP content size without delaying the activation click', async () => {
+    const harness = createHarness('floatpanel');
+    harness.seedStored(PIP_GEOMETRY_STORAGE_KEY, { width: 524, height: 718 });
+    const requestWindow = vi.fn(() => new Promise<Window>(() => {}));
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText('Connected')).toBeVisible());
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+
+    expect(requestWindow).toHaveBeenCalledWith({
+      width: 524,
+      height: 718,
+      disallowReturnToOpener: true,
+    });
+  });
+
+  it('persists resized PiP content geometry for the next activation', async () => {
+    const harness = createHarness('floatpanel');
+    const first = createPipWindow();
+    Object.defineProperties(first.pipWindow, {
+      innerWidth: { configurable: true, value: 612 },
+      innerHeight: { configurable: true, value: 744 },
+    });
+    const requestWindow = vi.fn()
+      .mockResolvedValueOnce(first.pipWindow)
+      .mockImplementationOnce(() => new Promise<Window>(() => {}));
+    let feedReady: ((eventWatermark: number) => void) | undefined;
+    const mountPipFeed: MountPipFeed = (options) => {
+      feedReady = options.onFeedReady;
+      return vi.fn();
+    };
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow }}
+        mountPipFeed={mountPipFeed}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(feedReady).toBeDefined());
+    await act(async () => {
+      feedReady?.(0);
+      await Promise.resolve();
+    });
+    await screen.findByText('Always-on-top window is active');
+    first.pipWindow.dispatchEvent(new Event('resize'));
+
+    await waitFor(() => {
+      expect(harness.readStored(PIP_GEOMETRY_STORAGE_KEY)).toEqual({
+        width: 612,
+        height: 744,
+      });
+    });
+
+    await act(async () => {
+      first.dispatchPageHide();
+      await Promise.resolve();
+    });
+    const reopen = await screen.findByRole('button', {
+      name: 'Reopen always-on-top window',
+    });
+    act(() => fireEvent.click(reopen));
+    expect(requestWindow).toHaveBeenLastCalledWith({
+      width: 612,
+      height: 744,
+      disallowReturnToOpener: true,
+    });
+  });
+
+  it('applies the feed light theme to host lifecycle controls', async () => {
+    const harness = createHarness('floatpanel');
+    harness.seedStored(SETTINGS_STORAGE_KEY, {
+      ...DEFAULT_SETTINGS,
+      uiTheme: 'light',
+    });
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: vi.fn(() => new Promise<Window>(() => {})) }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(document.querySelector('.floating-surface-host'))
+        .toHaveAttribute('data-theme', 'light');
+    });
+  });
+
   it('keeps the existing feed visible in activation and offers the primary PiP action', async () => {
     const harness = createHarness('floatpanel');
     const requestWindow = vi.fn(() => new Promise<Window>(() => {}));
@@ -686,6 +795,31 @@ describe('FloatingSurfaceHost', () => {
       .toBeEnabled();
   });
 
+  it('cleans a feed returned after pagehide wins synchronously during mount', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 29;
+    const pip = createPipWindow();
+    const cleanup = vi.fn();
+    const mountPipFeed: MountPipFeed = () => {
+      pip.dispatchPageHide();
+      return cleanup;
+    };
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{
+          window: null,
+          requestWindow: () => Promise.resolve(pip.pipWindow),
+        }}
+        mountPipFeed={mountPipFeed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+
+    await waitFor(() => expect(cleanup).toHaveBeenCalledTimes(1));
+  });
+
   it('reports one close and never mounts when pagehide wins while pip.opened is pending', async () => {
     const harness = createHarness('floatpanel');
     harness.deps.getCurrentWindowId = async () => 29;
@@ -939,6 +1073,33 @@ describe('FloatingSurfaceHost', () => {
 });
 
 describe('PipFeedRoot', () => {
+  it('applies the feed light theme to the PiP lifecycle bar', async () => {
+    const harness = createHarness('pip');
+    harness.seedStored(SETTINGS_STORAGE_KEY, {
+      ...DEFAULT_SETTINGS,
+      uiTheme: 'light',
+    });
+    const pip = createPipWindow();
+    const root = pip.pipDocument.createElement('div');
+    pip.pipDocument.body.append(root);
+
+    let cleanup!: () => void;
+    await act(async () => {
+      cleanup = mountPipFeedRoot({
+        root,
+        deps: harness.deps,
+        onFeedReady: vi.fn(),
+        onReturnToSidePanel: vi.fn(async () => true),
+      });
+    });
+
+    await waitFor(() => {
+      expect(root.querySelector('.pip-feed-root')?.getAttribute('data-theme'))
+        .toBe('light');
+    });
+    act(() => cleanup());
+  });
+
   it('mounts the shared feed with an always-on-top indicator and return action', async () => {
     const harness = createHarness('pip');
     const pip = createPipWindow();

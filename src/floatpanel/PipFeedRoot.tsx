@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { LocaleProvider, useLocale } from '../i18n/LocaleProvider';
 import { SidePanelApp, type SidePanelDependencies } from '../sidepanel/SidePanelApp';
 import { createPanelDependencies } from './create-panel-dependencies';
+import { useSurfaceTheme } from './use-surface-theme';
 
 export interface PipFeedRootOptions {
   root: HTMLElement;
@@ -17,6 +18,7 @@ function PipFeedContent(props: Omit<PipFeedRootOptions, 'root'> & {
 }) {
   const { translate } = useLocale();
   const [returnState, setReturnState] = useState<'idle' | 'switching' | 'error'>('idle');
+  const theme = useSurfaceTheme(props.deps);
   const returnInFlightRef = useRef(false);
 
   const returnToSidePanel = (): void => {
@@ -40,7 +42,7 @@ function PipFeedContent(props: Omit<PipFeedRootOptions, 'root'> & {
       : translate('floating.returnToSidePanel');
 
   return (
-    <div className="pip-feed-root">
+    <div className="pip-feed-root" data-theme={theme}>
       <div className="pip-lifecycle-bar" aria-label={translate('floating.alwaysOnTop')}>
         <span className="pip-lifecycle-indicator">
           <span className="pip-lifecycle-dot" aria-hidden="true" />
