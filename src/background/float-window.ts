@@ -51,6 +51,7 @@ export interface FloatWindowChrome {
     }): Promise<ChromeWindowSnapshot>;
     get(windowId: number): Promise<ChromeWindowSnapshot>;
     update(windowId: number, update: { focused: true }): Promise<unknown>;
+    remove(windowId: number): Promise<void>;
   };
   runtime: {
     getURL(path: string): string;
@@ -138,6 +139,26 @@ export class FloatWindowManager {
       if (this.openRequest === request) {
         this.openRequest = undefined;
       }
+    }
+  }
+
+  /** Close the tracked floating window. Missing/stale windows are already closed. */
+  async close(): Promise<boolean> {
+    const existingId = await this.readSessionWindowId();
+    if (existingId === undefined) return true;
+
+    try {
+      await this.chrome.windows.remove(existingId);
+      return true;
+    } catch {
+      try {
+        await this.chrome.windows.get(existingId);
+        return false;
+      } catch {
+        return true;
+      }
+    } finally {
+      await this.clearSessionWindowId();
     }
   }
 

@@ -57,6 +57,7 @@ function createHarness(options: {
   let nextWindowId = 500;
   const createCalls: Array<Record<string, unknown>> = [];
   const focusCalls: number[] = [];
+  const removeCalls: number[] = [];
 
   const chrome: FloatWindowChrome = {
     windows: {
@@ -90,6 +91,13 @@ function createHarness(options: {
         focusCalls.push(windowId);
         return {};
       },
+      async remove(windowId) {
+        if (!liveWindows.has(windowId)) {
+          throw new Error('window not found');
+        }
+        removeCalls.push(windowId);
+        liveWindows.delete(windowId);
+      },
     },
     runtime: {
       getURL: (path) => `chrome-extension://test-id/${path}`,
@@ -98,7 +106,7 @@ function createHarness(options: {
 
   const manager = new FloatWindowManager(chrome, { session, local });
 
-  return { manager, session, local, liveWindows, createCalls, focusCalls };
+  return { manager, session, local, liveWindows, createCalls, focusCalls, removeCalls };
 }
 
 describe('parseFloatGeometry', () => {
@@ -298,5 +306,26 @@ describe('FloatWindowManager.openOrFocus', () => {
     });
 
     expect(local.snapshot()).not.toHaveProperty(FLOAT_GEOMETRY_STORAGE_KEY);
+  });
+});
+
+describe('FloatWindowManager.close', () => {
+  it('closes the active floating window and clears its session id', async () => {
+    const { manager, session, removeCalls } = createHarness();
+    const opened = await manager.openOrFocus();
+    if (!opened.ok) throw new Error('expected open');
+
+    await expect(manager.close()).resolves.toBe(true);
+
+    expect(removeCalls).toEqual([opened.windowId]);
+    expect(session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+  });
+
+  it('treats a missing or stale window as already closed', async () => {
+    const { manager, session } = createHarness();
+    session.seed({ [FLOAT_WINDOW_ID_SESSION_KEY]: 404 });
+
+    await expect(manager.close()).resolves.toBe(true);
+    expect(session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
   });
 });

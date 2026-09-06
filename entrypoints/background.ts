@@ -200,6 +200,7 @@ export default defineBackground(() => {
       create: async (create) => (await browser.windows.create(create)) ?? {},
       get: async (windowId) => (await browser.windows.get(windowId)) ?? {},
       update: (windowId, update) => browser.windows.update(windowId, update),
+      remove: (windowId) => browser.windows.remove(windowId),
     },
     runtime: {
       getURL: (path) => browser.runtime.getURL(path as '/floatpanel.html'),

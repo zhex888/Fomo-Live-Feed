@@ -1,4 +1,8 @@
-import { configureActionSidePanel } from '../../src/sidepanel/sidepanel-api';
+import {
+  closeSidePanelForWindow,
+  configureActionSidePanel,
+  openSidePanelForWindow,
+} from '../../src/sidepanel/sidepanel-api';
 
 describe('configureActionSidePanel', () => {
   it('configures the extension action to open the side panel', async () => {
@@ -57,5 +61,29 @@ describe('configureActionSidePanel', () => {
       tabs: { create: async () => {} },
     });
     expect(addListener).not.toHaveBeenCalled();
+  });
+});
+
+describe('side panel lifecycle', () => {
+  it('opens and closes a global side panel for a browser window', async () => {
+    const open = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+    const chromeApi = { sidePanel: { open, close } };
+
+    await expect(openSidePanelForWindow(9, chromeApi)).resolves.toBe(true);
+    await expect(closeSidePanelForWindow(9, chromeApi)).resolves.toBe(true);
+    expect(open).toHaveBeenCalledWith({ windowId: 9 });
+    expect(close).toHaveBeenCalledWith({ windowId: 9 });
+  });
+
+  it('returns false when lifecycle APIs are missing or reject', async () => {
+    await expect(openSidePanelForWindow(1, {})).resolves.toBe(false);
+    await expect(closeSidePanelForWindow(1, {})).resolves.toBe(false);
+    await expect(openSidePanelForWindow(1, {
+      sidePanel: { open: async () => { throw new Error('failed'); } },
+    })).resolves.toBe(false);
+    await expect(closeSidePanelForWindow(1, {
+      sidePanel: { close: async () => { throw new Error('failed'); } },
+    })).resolves.toBe(false);
   });
 });

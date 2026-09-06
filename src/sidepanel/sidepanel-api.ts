@@ -2,6 +2,34 @@ interface SidePanelApiLike {
   setPanelBehavior?(options: {
     openPanelOnActionClick: boolean;
   }): Promise<void>;
+  open?(options: { windowId: number }): Promise<void>;
+  close?(options: { windowId: number }): Promise<void>;
+}
+
+export async function openSidePanelForWindow(
+  windowId: number,
+  chromeApi: ChromeWithOptionalSidePanel,
+): Promise<boolean> {
+  if (typeof chromeApi.sidePanel?.open !== 'function') return false;
+  try {
+    await chromeApi.sidePanel.open({ windowId });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function closeSidePanelForWindow(
+  windowId: number,
+  chromeApi: ChromeWithOptionalSidePanel,
+): Promise<boolean> {
+  if (typeof chromeApi.sidePanel?.close !== 'function') return false;
+  try {
+    await chromeApi.sidePanel.close({ windowId });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 interface ChromeWithOptionalSidePanel {
