@@ -189,27 +189,42 @@ export class FloatWindowManager {
    * call, so a window the user closed (or a stale id from a dead worker) is
    * never focused blindly.
    */
-  async openOrFocus(ownerWindowId?: number): Promise<OpenFloatWindowResult> {
-    if (ownerWindowId !== undefined && Number.isInteger(ownerWindowId) && ownerWindowId >= 0) {
-      this.ownerWindowIdCache = ownerWindowId;
-      await this.storage.session.set({
-        [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: ownerWindowId,
-      });
-    }
+  openOrFocus(ownerWindowId?: number): Promise<OpenFloatWindowResult> {
     if (this.openRequest !== undefined) {
       return this.openRequest;
     }
 
-    const request = this.openOrFocusOnce();
+    const request = this.runLifecycleMutation(
+      () => this.openOrFocusWithOwnerOnce(ownerWindowId),
+    );
     this.openRequest = request;
-
-    try {
-      return await request;
-    } finally {
+    void request.then(() => {
       if (this.openRequest === request) {
         this.openRequest = undefined;
       }
+    }, () => {
+      if (this.openRequest === request) {
+        this.openRequest = undefined;
+      }
+    });
+    return request;
+  }
+
+  private async openOrFocusWithOwnerOnce(
+    ownerWindowId: number | undefined,
+  ): Promise<OpenFloatWindowResult> {
+    if (ownerWindowId !== undefined && Number.isInteger(ownerWindowId) && ownerWindowId >= 0) {
+      try {
+        await this.storage.session.set({
+          [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: ownerWindowId,
+        });
+        this.ownerWindowIdCache = ownerWindowId;
+      } catch {
+        return { ok: false, reason: 'chrome-api-failed' };
+      }
     }
+
+    return this.openOrFocusOnce();
   }
 
   async ownerWindowId(): Promise<number | undefined> {

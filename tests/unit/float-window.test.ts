@@ -77,8 +77,12 @@ function createHarness(options: {
   beforeCreate?: () => Promise<void>;
 } = {}) {
   const sessionStorage = new InMemoryArea();
+  const sessionGetCalls: string[][] = [];
   const session = {
-    get: (keys: string[]) => sessionStorage.get(keys),
+    get(keys: string[]) {
+      sessionGetCalls.push(keys);
+      return sessionStorage.get(keys);
+    },
     async set(items: Record<string, unknown>) {
       await options.beforeSessionSet?.(items);
       await sessionStorage.set(items);
@@ -161,6 +165,7 @@ function createHarness(options: {
     manager,
     chrome,
     session,
+    sessionGetCalls,
     local,
     liveWindows,
     createCalls,
@@ -389,6 +394,78 @@ describe('FloatWindowManager.close', () => {
 
     await expect(manager.close()).resolves.toBe(true);
     expect(session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+  });
+
+  it('waits for an in-flight open to persist its host before closing it', async () => {
+    let releaseHostWrite: (() => void) | undefined;
+    let signalHostWrite: (() => void) | undefined;
+    const hostWriteStarted = new Promise<void>((resolve) => {
+      signalHostWrite = resolve;
+    });
+    const hostWriteGate = new Promise<void>((resolve) => {
+      releaseHostWrite = resolve;
+    });
+    let gated = false;
+    const harness = createHarness({
+      async beforeSessionSet(items) {
+        const value = items[FLOAT_WINDOW_ID_SESSION_KEY];
+        if (!gated && typeof value === 'number' && value >= 0) {
+          gated = true;
+          signalHostWrite?.();
+          await hostWriteGate;
+        }
+      },
+    });
+
+    const open = harness.manager.openOrFocus();
+    await hostWriteStarted;
+    const close = harness.manager.close();
+    releaseHostWrite?.();
+
+    const opened = await open;
+    if (!opened.ok) throw new Error('expected open');
+    await expect(close).resolves.toBe(true);
+    expect(harness.removeCalls).toEqual([opened.windowId]);
+    expect(harness.liveWindows.has(opened.windowId)).toBe(false);
+    expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+  });
+
+  it('waits for close cleanup before opening and preserves the new host id', async () => {
+    let releaseCloseClear: (() => void) | undefined;
+    let signalCloseClear: (() => void) | undefined;
+    const closeClearStarted = new Promise<void>((resolve) => {
+      signalCloseClear = resolve;
+    });
+    const closeClearGate = new Promise<void>((resolve) => {
+      releaseCloseClear = resolve;
+    });
+    let gated = false;
+    const harness = createHarness({
+      async beforeSessionSet(items) {
+        if (!gated && items[FLOAT_WINDOW_ID_SESSION_KEY] === -1) {
+          gated = true;
+          signalCloseClear?.();
+          await closeClearGate;
+        }
+      },
+    });
+    const first = await harness.manager.openOrFocus();
+    if (!first.ok) throw new Error('expected first open');
+
+    const close = harness.manager.close();
+    await closeClearStarted;
+    const readsBeforeReopen = harness.sessionGetCalls.length;
+    const reopen = harness.manager.openOrFocus();
+    expect(harness.sessionGetCalls).toHaveLength(readsBeforeReopen);
+    releaseCloseClear?.();
+
+    await expect(close).resolves.toBe(true);
+    const reopened = await reopen;
+    if (!reopened.ok) throw new Error('expected reopen');
+    expect(reopened.created).toBe(true);
+    expect(reopened.windowId).not.toBe(first.windowId);
+    expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(reopened.windowId);
+    expect(harness.liveWindows.has(reopened.windowId)).toBe(true);
   });
 });
 
