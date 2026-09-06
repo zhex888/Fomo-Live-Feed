@@ -176,6 +176,7 @@ export function parseFloatGeometry(value: unknown): FloatWindowGeometry {
 export class FloatWindowManager {
   private openRequest: Promise<OpenFloatWindowResult> | undefined;
   private ownerWindowIdCache: number | undefined;
+  private pipSessionCache: PipSessionState | undefined;
   private lifecycleMutationQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -241,6 +242,12 @@ export class FloatWindowManager {
     return this.ownerWindowIdCache;
   }
 
+  /** Validate a live UI token without crossing the user-activation boundary. */
+  cachedPipSessionMatches(hostWindowId: number, sessionId: string): boolean {
+    return this.pipSessionCache?.hostWindowId === hostWindowId
+      && this.pipSessionCache.sessionId === sessionId;
+  }
+
   async registerPipOpened(
     hostWindowId: number,
     sessionId: string,
@@ -263,6 +270,7 @@ export class FloatWindowManager {
         state.pipSession.hostWindowId === hostWindowId
         && state.pipSession.sessionId === sessionId
       ) {
+        this.pipSessionCache = { ...state.pipSession };
         return { ok: true, created: false };
       }
       return { ok: false, reason: 'session-conflict' };
@@ -321,7 +329,7 @@ export class FloatWindowManager {
   async handlePipClosed(
     hostWindowId: number,
     sessionId: string,
-    reason: 'native-close',
+    reason: 'native-close' | 'mount-failed' | 'return-to-sidepanel',
   ): Promise<HandlePipClosedResult> {
     return this.runLifecycleMutation(
       () => this.handlePipClosedOnce(hostWindowId, sessionId, reason),
@@ -331,7 +339,7 @@ export class FloatWindowManager {
   private async handlePipClosedOnce(
     hostWindowId: number,
     sessionId: string,
-    _reason: 'native-close',
+    reason: 'native-close' | 'mount-failed' | 'return-to-sidepanel',
   ): Promise<HandlePipClosedResult> {
     const state = await this.readLifecycleState();
     if (!state.ok) return state;
@@ -346,15 +354,17 @@ export class FloatWindowManager {
       return { ok: false, reason: 'session-mismatch' };
     }
 
-    try {
-      await this.chrome.windows.update(hostWindowId, { state: 'normal', focused: true });
-    } catch {
-      return { ok: false, reason: 'chrome-api-failed' };
+    if (reason !== 'return-to-sidepanel') {
+      try {
+        await this.chrome.windows.update(hostWindowId, { state: 'normal', focused: true });
+      } catch {
+        return { ok: false, reason: 'chrome-api-failed' };
+      }
     }
 
     try {
       await this.clearPipSession();
-      return { ok: true, restored: true };
+      return { ok: true, restored: reason !== 'return-to-sidepanel' };
     } catch {
       return { ok: false, reason: 'chrome-api-failed' };
     }
@@ -406,7 +416,11 @@ export class FloatWindowManager {
       await this.chrome.windows.get(state.hostWindowId);
     } catch {
       try {
-        await this.clearPipSession();
+        await this.storage.session.set({
+          [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+          [PIP_SESSION_STORAGE_KEY]: -1,
+        });
+        this.pipSessionCache = undefined;
         return { ok: false, reason: 'host-missing' };
       } catch {
         return { ok: false, reason: 'chrome-api-failed' };
@@ -472,6 +486,7 @@ export class FloatWindowManager {
         [PIP_SESSION_STORAGE_KEY]: -1,
       });
       this.ownerWindowIdCache = undefined;
+      this.pipSessionCache = undefined;
     } catch {
       return false;
     }
@@ -541,6 +556,7 @@ export class FloatWindowManager {
           [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
           [PIP_SESSION_STORAGE_KEY]: -1,
         });
+        this.pipSessionCache = undefined;
       } catch {
         // Chrome may be shutting down; removal handlers must not reject.
       }
@@ -583,18 +599,25 @@ export class FloatWindowManager {
 
   private async writeSessionWindowId(windowId: number): Promise<void> {
     await this.storage.session.set({ [FLOAT_WINDOW_ID_SESSION_KEY]: windowId });
+    this.pipSessionCache = undefined;
   }
 
   private async clearSessionWindowId(): Promise<void> {
-    await this.storage.session.set({ [FLOAT_WINDOW_ID_SESSION_KEY]: -1 });
+    await this.storage.session.set({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+      [PIP_SESSION_STORAGE_KEY]: -1,
+    });
+    this.pipSessionCache = undefined;
   }
 
   private async writePipSession(session: PipSessionState): Promise<void> {
     await this.storage.session.set({ [PIP_SESSION_STORAGE_KEY]: session });
+    this.pipSessionCache = { ...session };
   }
 
   private async clearPipSession(): Promise<void> {
     await this.storage.session.set({ [PIP_SESSION_STORAGE_KEY]: -1 });
+    this.pipSessionCache = undefined;
   }
 
   private async readLifecycleState(): Promise<LifecycleStateResult> {

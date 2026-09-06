@@ -635,6 +635,20 @@ describe('FloatWindowManager PiP session', () => {
     expect(harness.pipSessionsAtUpdate.at(-1)).toMatchObject({ phase: 'ready' });
   });
 
+  it('maintains an exact synchronous cache for the live PiP session', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(false);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(true);
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-old')).toBe(false);
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId + 1, 'pip-1')).toBe(false);
+
+    await harness.manager.markPipReady(hostWindowId, 'pip-1');
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(true);
+  });
+
   it('keeps the ready session when minimizing the host fails', async () => {
     const harness = createHarness({ failUpdate: true });
     const hostWindowId = await openHost(harness);
@@ -695,6 +709,38 @@ describe('FloatWindowManager PiP session', () => {
       windowId: hostWindowId,
       update: { state: 'normal', focused: true },
     });
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(false);
+  });
+
+  it('restores mount failures but clears return closes without restoring the host', async () => {
+    const mountHarness = createHarness();
+    const mountHostWindowId = await openHost(mountHarness);
+    await mountHarness.manager.registerPipOpened(mountHostWindowId, 'pip-mount');
+
+    await expect(
+      mountHarness.manager.handlePipClosed(mountHostWindowId, 'pip-mount', 'mount-failed'),
+    ).resolves.toEqual({ ok: true, restored: true });
+    expect(mountHarness.updateCalls.at(-1)).toEqual({
+      windowId: mountHostWindowId,
+      update: { state: 'normal', focused: true },
+    });
+
+    const returnHarness = createHarness();
+    const returnHostWindowId = await openHost(returnHarness);
+    await returnHarness.manager.registerPipOpened(returnHostWindowId, 'pip-return');
+
+    await expect(
+      returnHarness.manager.handlePipClosed(
+        returnHostWindowId,
+        'pip-return',
+        'return-to-sidepanel',
+      ),
+    ).resolves.toEqual({ ok: true, restored: false });
+    expect(returnHarness.updateCalls).toEqual([]);
+    expect(returnHarness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+    expect(
+      returnHarness.manager.cachedPipSessionMatches(returnHostWindowId, 'pip-return'),
+    ).toBe(false);
   });
 
   it('keeps a closed token retryable until host restoration succeeds', async () => {
@@ -765,6 +811,21 @@ describe('FloatWindowManager PiP session', () => {
     await harness.manager.handleWindowRemoved(hostWindowId);
 
     expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(false);
+  });
+
+  it('invalidates the old PiP token when a missing host is replaced', async () => {
+    const harness = createHarness();
+    const oldHostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(oldHostWindowId, 'pip-old');
+    harness.liveWindows.delete(oldHostWindowId);
+
+    await expect(harness.manager.openOrFocus()).resolves.toMatchObject({
+      ok: true,
+      created: true,
+    });
+    expect(harness.manager.cachedPipSessionMatches(oldHostWindowId, 'pip-old')).toBe(false);
     expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
   });
 
@@ -936,6 +997,27 @@ describe('FloatWindowManager PiP session', () => {
       update: { state: 'normal', focused: true },
     });
     expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+    expect(restartedManager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(false);
+  });
+
+  it('clears the tracked host and PiP token when recovery finds the host gone', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    harness.liveWindows.delete(hostWindowId);
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'host-missing',
+    });
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+      [PIP_SESSION_STORAGE_KEY]: -1,
+    });
   });
 
   it('keeps a recovered token retryable until host restoration succeeds', async () => {

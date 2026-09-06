@@ -238,7 +238,9 @@ export default defineBackground(() => {
    * float window.
    */
   let currentDisplayMode: 'sidepanel' | 'floating' = 'sidepanel';
-  const sidePanelChrome = browser as unknown as ChromeWithOptionalSidePanel;
+  const sidePanelChrome = (
+    globalThis as typeof globalThis & { chrome?: ChromeWithOptionalSidePanel }
+  ).chrome ?? browser as unknown as ChromeWithOptionalSidePanel;
   const surfaceSwitchCoordinator = new SurfaceSwitchCoordinator({
     operations: {
       openFloating: async (ownerWindowId) => (
@@ -266,6 +268,17 @@ export default defineBackground(() => {
       void browser.runtime.sendMessage(started).catch(() => {});
     },
   });
+
+  const broadcastSurfaceSwitchChanged = (
+    result: Awaited<ReturnType<SurfaceSwitchCoordinator['request']>>,
+  ): void => {
+    const changed: ExtensionMessage = {
+      protocolVersion: 1,
+      type: 'surface.switch.changed',
+      payload: result,
+    };
+    void browser.runtime.sendMessage(changed).catch(() => {});
+  };
 
   // When the side panel behavior is OFF (floating mode), Chrome fires
   // action.onClicked instead of opening the panel. The listener must ALWAYS
@@ -618,6 +631,11 @@ export default defineBackground(() => {
   });
 
   const bootstrap = async (): Promise<void> => {
+    // A persisted PiP token cannot prove that its document survived a worker
+    // restart. Normalize the tracked host and clear that unconfirmed token;
+    // a live PiP will establish a fresh synchronous cache via pip.opened.
+    await floatWindowManager.recoverStoredPipSession();
+
     // Seed the display mode before wiring the action behavior so the action
     // routes to the right surface from the very first click.
     const settings = await preferences.getSettings().catch(() => undefined);
@@ -807,12 +825,7 @@ export default defineBackground(() => {
             .catch(() => ({ ok: false as const }));
         case 'surface.switch.request':
           return surfaceSwitchCoordinator.request(message.payload).then((result) => {
-            const changed: ExtensionMessage = {
-              protocolVersion: 1,
-              type: 'surface.switch.changed',
-              payload: result,
-            };
-            void browser.runtime.sendMessage(changed).catch(() => {});
+            broadcastSurfaceSwitchChanged(result);
             return result;
           });
         case 'surface.bootstrap':
@@ -833,6 +846,44 @@ export default defineBackground(() => {
         case 'surface.switch.changed':
         case 'surface.switch.started':
           return undefined;
+        case 'pip.opened':
+          return floatWindowManager.registerPipOpened(
+            message.payload.hostWindowId,
+            message.payload.sessionId,
+          );
+        case 'pip.ready':
+          return floatWindowManager.markPipReady(
+            message.payload.hostWindowId,
+            message.payload.sessionId,
+          );
+        case 'pip.closed':
+          return floatWindowManager.handlePipClosed(
+            message.payload.hostWindowId,
+            message.payload.sessionId,
+            message.payload.reason,
+          );
+        case 'pip.returnToSidePanel': {
+          const { hostWindowId, sessionId, switchId } = message.payload;
+          if (!floatWindowManager.cachedPipSessionMatches(hostWindowId, sessionId)) {
+            // Never await storage before sidePanel.open: after a worker restart
+            // an empty cache is rejected honestly and recovery repairs storage.
+            void floatWindowManager.recoverStoredPipSession().catch(() => {});
+            return {
+              ok: false as const,
+              switchId,
+              reason: 'stale-switch' as const,
+            };
+          }
+
+          const result = surfaceSwitchCoordinator.request({
+            switchId,
+            source: 'floating',
+            target: 'sidepanel',
+            sourceWindowId: hostWindowId,
+          });
+          void result.then(broadcastSurfaceSwitchChanged).catch(() => {});
+          return result;
+        }
         case 'sync.request':
           // Task 5 Step 5: the side panel/popup asks for a bounded backfill.
           // Single-flight makes a request racing a reconnect backfill a no-op.
