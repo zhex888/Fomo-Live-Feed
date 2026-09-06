@@ -180,6 +180,10 @@ export function trustClassForMessageType(
     case 'surface.switch.request':
     case 'surface.bootstrap':
     case 'surface.ready':
+    case 'pip.opened':
+    case 'pip.ready':
+    case 'pip.closed':
+    case 'pip.returnToSidePanel':
       return 'privileged-ui-page';
     case 'activity.broadcast':
     case 'events.changed':

@@ -42,6 +42,7 @@ const MAX_TRANSLATION_TEXT_LENGTH = 2_000;
 const MAX_TRANSLATION_ID_LENGTH = 128;
 const MAX_TRANSLATION_LANGUAGE_LENGTH = 16;
 const MAX_SWITCH_ID_LENGTH = 128;
+const MAX_PIP_SESSION_ID_LENGTH = 128;
 
 export const SURFACE_KEYS = ['sidepanel', 'floating'] as const;
 export type SurfaceKey = (typeof SURFACE_KEYS)[number];
@@ -55,6 +56,12 @@ export const SURFACE_SWITCH_FAILURES = [
   'state-persist-failed',
 ] as const;
 export type SurfaceSwitchFailure = (typeof SURFACE_SWITCH_FAILURES)[number];
+
+export const PIP_CLOSE_REASONS = [
+  'native-close',
+  'return-to-sidepanel',
+  'mount-failed',
+] as const;
 
 const CHAIN_KEYS = [
   'bsc',
@@ -256,6 +263,23 @@ const surfaceSwitchStartedPayloadSchema = z.object({
   target: z.enum(SURFACE_KEYS),
 }).strict();
 
+const pipSessionPayloadSchema = z.object({
+  sessionId: trimmedBoundedString(MAX_PIP_SESSION_ID_LENGTH),
+  hostWindowId: z.number().int().nonnegative(),
+}).strict();
+
+const pipReadyPayloadSchema = pipSessionPayloadSchema.extend({
+  eventWatermark: z.number().int().nonnegative(),
+});
+
+const pipClosedPayloadSchema = pipSessionPayloadSchema.extend({
+  reason: z.enum(PIP_CLOSE_REASONS),
+});
+
+const pipReturnToSidePanelPayloadSchema = pipSessionPayloadSchema.extend({
+  switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
+});
+
 // Versioned, discriminated message union for every extension context. Keep the
 // branch list in KNOWN_MESSAGE_TYPES in sync with this union.
 export const extensionMessageSchema = z.discriminatedUnion('type', [
@@ -389,6 +413,26 @@ export const extensionMessageSchema = z.discriminatedUnion('type', [
     protocolVersion: z.literal(PROTOCOL_VERSION),
     type: z.literal('surface.switch.started'),
     payload: surfaceSwitchStartedPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('pip.opened'),
+    payload: pipSessionPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('pip.ready'),
+    payload: pipReadyPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('pip.closed'),
+    payload: pipClosedPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('pip.returnToSidePanel'),
+    payload: pipReturnToSidePanelPayloadSchema,
   }).strict(),
   z.object({
     protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -599,6 +643,10 @@ const KNOWN_MESSAGE_TYPES = [
   'surface.ready',
   'surface.switch.changed',
   'surface.switch.started',
+  'pip.opened',
+  'pip.ready',
+  'pip.closed',
+  'pip.returnToSidePanel',
   'capture.ping',
   'navigation.openToken',
   'translation.request',
