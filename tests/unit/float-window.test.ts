@@ -13,8 +13,14 @@ import {
 
 class InMemoryArea {
   private readonly items = new Map<string, unknown>();
+  private getFailures = 0;
+  private setFailures = 0;
 
   async get(keys: string[]): Promise<Record<string, unknown>> {
+    if (this.getFailures > 0) {
+      this.getFailures -= 1;
+      throw new Error('get failed');
+    }
     const result: Record<string, unknown> = {};
     for (const key of keys) {
       if (this.items.has(key)) {
@@ -25,6 +31,10 @@ class InMemoryArea {
   }
 
   async set(items: Record<string, unknown>): Promise<void> {
+    if (this.setFailures > 0) {
+      this.setFailures -= 1;
+      throw new Error('set failed');
+    }
     for (const [key, value] of Object.entries(items)) {
       this.items.set(key, value);
     }
@@ -34,6 +44,14 @@ class InMemoryArea {
     for (const [key, value] of Object.entries(items)) {
       this.items.set(key, value);
     }
+  }
+
+  failNextGet(): void {
+    this.getFailures += 1;
+  }
+
+  failNextSet(): void {
+    this.setFailures += 1;
   }
 
   snapshot(): Record<string, unknown> {
@@ -52,9 +70,24 @@ interface FakeWindow {
 function createHarness(options: {
   failCreate?: boolean;
   failUpdate?: boolean;
+  failUpdateTimes?: number;
+  failRemove?: boolean;
+  beforeRemove?: () => Promise<void>;
+  beforeSessionSet?: (items: Record<string, unknown>) => Promise<void>;
   beforeCreate?: () => Promise<void>;
 } = {}) {
-  const session = new InMemoryArea();
+  const sessionStorage = new InMemoryArea();
+  const session = {
+    get: (keys: string[]) => sessionStorage.get(keys),
+    async set(items: Record<string, unknown>) {
+      await options.beforeSessionSet?.(items);
+      await sessionStorage.set(items);
+    },
+    seed: (items: Record<string, unknown>) => sessionStorage.seed(items),
+    snapshot: () => sessionStorage.snapshot(),
+    failNextGet: () => sessionStorage.failNextGet(),
+    failNextSet: () => sessionStorage.failNextSet(),
+  };
   const local = new InMemoryArea();
   const liveWindows = new Map<number, FakeWindow>();
   let nextWindowId = 500;
@@ -63,6 +96,7 @@ function createHarness(options: {
   const updateCalls: Array<{ windowId: number; update: Record<string, unknown> }> = [];
   const pipSessionsAtUpdate: unknown[] = [];
   const removeCalls: number[] = [];
+  let updateFailures = options.failUpdateTimes ?? (options.failUpdate ? Number.POSITIVE_INFINITY : 0);
 
   const chrome: FloatWindowChrome = {
     windows: {
@@ -95,7 +129,8 @@ function createHarness(options: {
         }
         updateCalls.push({ windowId, update });
         pipSessionsAtUpdate.push(session.snapshot()[PIP_SESSION_STORAGE_KEY]);
-        if (options.failUpdate) {
+        if (updateFailures > 0) {
+          updateFailures -= 1;
           throw new Error('update failed');
         }
         if ('focused' in update && update.focused === true && !('state' in update)) {
@@ -106,6 +141,10 @@ function createHarness(options: {
       async remove(windowId) {
         if (!liveWindows.has(windowId)) {
           throw new Error('window not found');
+        }
+        await options.beforeRemove?.();
+        if (options.failRemove) {
+          throw new Error('remove failed');
         }
         removeCalls.push(windowId);
         liveWindows.delete(windowId);
@@ -419,6 +458,40 @@ describe('FloatWindowManager PiP session', () => {
     });
   });
 
+  it('serializes concurrent registrations so only one different token is created', async () => {
+    let releaseFirstPipWrite: (() => void) | undefined;
+    let signalFirstPipWrite: (() => void) | undefined;
+    const firstPipWriteStarted = new Promise<void>((resolve) => {
+      signalFirstPipWrite = resolve;
+    });
+    const firstPipWriteGate = new Promise<void>((resolve) => {
+      releaseFirstPipWrite = resolve;
+    });
+    let gated = false;
+    const harness = createHarness({
+      async beforeSessionSet(items) {
+        const value = items[PIP_SESSION_STORAGE_KEY];
+        if (!gated && typeof value === 'object' && value !== null) {
+          gated = true;
+          signalFirstPipWrite?.();
+          await firstPipWriteGate;
+        }
+      },
+    });
+    const hostWindowId = await openHost(harness);
+
+    const first = harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    await firstPipWriteStarted;
+    const second = harness.manager.registerPipOpened(hostWindowId, 'pip-2');
+    await Promise.resolve();
+    releaseFirstPipWrite?.();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { ok: true, created: true },
+      { ok: false, reason: 'session-conflict' },
+    ]);
+  });
+
   it('persists ready before minimizing the matching host', async () => {
     const harness = createHarness();
     const hostWindowId = await openHost(harness);
@@ -502,6 +575,53 @@ describe('FloatWindowManager PiP session', () => {
     });
   });
 
+  it('keeps a closed token retryable until host restoration succeeds', async () => {
+    const harness = createHarness({ failUpdateTimes: 1 });
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await expect(
+      harness.manager.handlePipClosed(hostWindowId, 'pip-1', 'native-close'),
+    ).resolves.toEqual({ ok: false, reason: 'chrome-api-failed' });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-1',
+    });
+
+    await expect(
+      harness.manager.handlePipClosed(hostWindowId, 'pip-1', 'native-close'),
+    ).resolves.toEqual({ ok: true, restored: true });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('does not let ready race behind close and recreate a cleared session', async () => {
+    let releaseRemove: (() => void) | undefined;
+    let signalRemove: (() => void) | undefined;
+    const removeStarted = new Promise<void>((resolve) => {
+      signalRemove = resolve;
+    });
+    const removeGate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    const harness = createHarness({
+      async beforeRemove() {
+        signalRemove?.();
+        await removeGate;
+      },
+    });
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    const close = harness.manager.close();
+    await removeStarted;
+    const ready = harness.manager.markPipReady(hostWindowId, 'pip-1');
+    releaseRemove?.();
+
+    await expect(close).resolves.toBe(true);
+    await expect(ready).resolves.toEqual({ ok: false, reason: 'host-mismatch' });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+    expect(harness.updateCalls).toHaveLength(0);
+  });
+
   it('ignores stale close events without changing the new session', async () => {
     const harness = createHarness();
     const hostWindowId = await openHost(harness);
@@ -541,6 +661,37 @@ describe('FloatWindowManager PiP session', () => {
     });
   });
 
+  it('preserves all tracked state when close cannot read session storage', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.openOrFocus(77);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    const before = harness.session.snapshot();
+    harness.session.failNextGet();
+
+    await expect(harness.manager.close()).resolves.toBe(false);
+    expect(harness.session.snapshot()).toEqual(before);
+    expect(harness.liveWindows.has(hostWindowId)).toBe(true);
+  });
+
+  it('preserves tracked state when close confirms a failed removal left the host live', async () => {
+    const harness = createHarness({ failRemove: true });
+    const hostWindowId = await openHost(harness);
+    await harness.manager.openOrFocus(77);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    const before = harness.session.snapshot();
+
+    await expect(harness.manager.close()).resolves.toBe(false);
+    expect(harness.session.snapshot()).toEqual(before);
+
+    await expect(harness.manager.openOrFocus()).resolves.toEqual({
+      ok: true,
+      windowId: hostWindowId,
+      created: false,
+    });
+    expect(harness.createCalls).toHaveLength(1);
+  });
+
   it('parses a stored session after worker restart and clears invalid records', async () => {
     const validHarness = createHarness();
     const hostWindowId = await openHost(validHarness);
@@ -552,9 +703,12 @@ describe('FloatWindowManager PiP session', () => {
     });
 
     await expect(restartedManager.activePipSession()).resolves.toEqual({
-      sessionId: 'pip-1',
-      hostWindowId,
-      phase: 'ready',
+      ok: true,
+      session: {
+        sessionId: 'pip-1',
+        hostWindowId,
+        phase: 'ready',
+      },
     });
 
     const invalidHarness = createHarness();
@@ -571,7 +725,7 @@ describe('FloatWindowManager PiP session', () => {
       local: invalidHarness.local,
     });
 
-    await expect(restartedInvalidManager.activePipSession()).resolves.toBeUndefined();
+    await expect(restartedInvalidManager.activePipSession()).resolves.toEqual({ ok: true });
     expect(invalidHarness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
   });
 
@@ -590,8 +744,27 @@ describe('FloatWindowManager PiP session', () => {
       local: harness.local,
     });
 
-    await expect(restartedManager.activePipSession()).resolves.toBeUndefined();
+    await expect(restartedManager.activePipSession()).resolves.toEqual({ ok: true });
     expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('distinguishes active-session storage failures from an empty session', async () => {
+    const getFailureHarness = createHarness();
+    getFailureHarness.session.failNextGet();
+    await expect(getFailureHarness.manager.activePipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'chrome-api-failed',
+    });
+
+    const cleanupFailureHarness = createHarness();
+    cleanupFailureHarness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: { sessionId: '', hostWindowId: 1, phase: 'opened' },
+    });
+    cleanupFailureHarness.session.failNextSet();
+    await expect(cleanupFailureHarness.manager.activePipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'chrome-api-failed',
+    });
   });
 
   it('clears an orphaned stored session when its host is not tracked', async () => {
@@ -639,6 +812,30 @@ describe('FloatWindowManager PiP session', () => {
     expect(harness.updateCalls.at(-1)).toEqual({
       windowId: hostWindowId,
       update: { state: 'normal', focused: true },
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('keeps a recovered token retryable until host restoration succeeds', async () => {
+    const harness = createHarness({ failUpdateTimes: 1 });
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'chrome-api-failed',
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-1',
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
     });
     expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
   });

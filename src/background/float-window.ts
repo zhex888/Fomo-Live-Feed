@@ -103,6 +103,10 @@ export type RecoverStoredPipSessionResult =
   | { ok: true; recovered: boolean }
   | { ok: false; reason: 'host-mismatch' | 'host-missing' | 'chrome-api-failed' };
 
+export type ActivePipSessionResult =
+  | { ok: true; session?: PipSessionState }
+  | { ok: false; reason: 'chrome-api-failed' };
+
 const isFinitePositive = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0;
 
@@ -172,6 +176,7 @@ export function parseFloatGeometry(value: unknown): FloatWindowGeometry {
 export class FloatWindowManager {
   private openRequest: Promise<OpenFloatWindowResult> | undefined;
   private ownerWindowIdCache: number | undefined;
+  private lifecycleMutationQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly chrome: FloatWindowChrome,
@@ -225,6 +230,13 @@ export class FloatWindowManager {
     hostWindowId: number,
     sessionId: string,
   ): Promise<RegisterPipOpenedResult> {
+    return this.runLifecycleMutation(() => this.registerPipOpenedOnce(hostWindowId, sessionId));
+  }
+
+  private async registerPipOpenedOnce(
+    hostWindowId: number,
+    sessionId: string,
+  ): Promise<RegisterPipOpenedResult> {
     const state = await this.readLifecycleState();
     if (!state.ok) return state;
     if (state.hostWindowId !== hostWindowId) {
@@ -254,6 +266,13 @@ export class FloatWindowManager {
   }
 
   async markPipReady(
+    hostWindowId: number,
+    sessionId: string,
+  ): Promise<MarkPipReadyResult> {
+    return this.runLifecycleMutation(() => this.markPipReadyOnce(hostWindowId, sessionId));
+  }
+
+  private async markPipReadyOnce(
     hostWindowId: number,
     sessionId: string,
   ): Promise<MarkPipReadyResult> {
@@ -287,6 +306,16 @@ export class FloatWindowManager {
   async handlePipClosed(
     hostWindowId: number,
     sessionId: string,
+    reason: 'native-close',
+  ): Promise<HandlePipClosedResult> {
+    return this.runLifecycleMutation(
+      () => this.handlePipClosedOnce(hostWindowId, sessionId, reason),
+    );
+  }
+
+  private async handlePipClosedOnce(
+    hostWindowId: number,
+    sessionId: string,
     _reason: 'native-close',
   ): Promise<HandlePipClosedResult> {
     const state = await this.readLifecycleState();
@@ -303,38 +332,47 @@ export class FloatWindowManager {
     }
 
     try {
-      await this.clearPipSession();
+      await this.chrome.windows.update(hostWindowId, { state: 'normal', focused: true });
     } catch {
       return { ok: false, reason: 'chrome-api-failed' };
     }
 
     try {
-      await this.chrome.windows.update(hostWindowId, { state: 'normal', focused: true });
+      await this.clearPipSession();
       return { ok: true, restored: true };
     } catch {
-      return { ok: true, restored: false };
+      return { ok: false, reason: 'chrome-api-failed' };
     }
   }
 
-  async activePipSession(): Promise<PipSessionState | undefined> {
+  async activePipSession(): Promise<ActivePipSessionResult> {
+    return this.runLifecycleMutation(() => this.activePipSessionOnce());
+  }
+
+  private async activePipSessionOnce(): Promise<ActivePipSessionResult> {
     const state = await this.readLifecycleState();
-    if (!state.ok || state.pipSession === undefined) {
-      return undefined;
+    if (!state.ok) return state;
+    if (state.pipSession === undefined) {
+      return { ok: true };
     }
 
     if (state.hostWindowId !== state.pipSession.hostWindowId) {
       try {
         await this.clearPipSession();
       } catch {
-        // Reading the active session is best-effort and never rejects.
+        return { ok: false, reason: 'chrome-api-failed' };
       }
-      return undefined;
+      return { ok: true };
     }
 
-    return state.pipSession;
+    return { ok: true, session: state.pipSession };
   }
 
   async recoverStoredPipSession(): Promise<RecoverStoredPipSessionResult> {
+    return this.runLifecycleMutation(() => this.recoverStoredPipSessionOnce());
+  }
+
+  private async recoverStoredPipSessionOnce(): Promise<RecoverStoredPipSessionResult> {
     const state = await this.readLifecycleState();
     if (!state.ok) return state;
     if (state.pipSession === undefined) {
@@ -361,11 +399,16 @@ export class FloatWindowManager {
     }
 
     try {
-      await this.clearPipSession();
       await this.chrome.windows.update(state.hostWindowId, {
         state: 'normal',
         focused: true,
       });
+    } catch {
+      return { ok: false, reason: 'chrome-api-failed' };
+    }
+
+    try {
+      await this.clearPipSession();
       return { ok: true, recovered: true };
     } catch {
       return { ok: false, reason: 'chrome-api-failed' };
@@ -374,8 +417,24 @@ export class FloatWindowManager {
 
   /** Close the tracked floating window. Missing/stale windows are already closed. */
   async close(): Promise<boolean> {
-    const existingId = await this.readSessionWindowId();
-    let closed = true;
+    return this.runLifecycleMutation(() => this.closeOnce());
+  }
+
+  private async closeOnce(): Promise<boolean> {
+    let existingId: number | undefined;
+    try {
+      const stored = await this.storage.session.get([
+        FLOAT_WINDOW_ID_SESSION_KEY,
+        FLOAT_OWNER_WINDOW_ID_SESSION_KEY,
+        PIP_SESSION_STORAGE_KEY,
+      ]);
+      const value = stored[FLOAT_WINDOW_ID_SESSION_KEY];
+      existingId = typeof value === 'number' && Number.isInteger(value) && value >= 0
+        ? value
+        : undefined;
+    } catch {
+      return false;
+    }
 
     if (existingId !== undefined) {
       try {
@@ -383,9 +442,9 @@ export class FloatWindowManager {
       } catch {
         try {
           await this.chrome.windows.get(existingId);
-          closed = false;
+          return false;
         } catch {
-          closed = true;
+          // A rejected lookup after removal failed confirms the host is gone.
         }
       }
     }
@@ -401,7 +460,7 @@ export class FloatWindowManager {
       return false;
     }
 
-    return closed;
+    return true;
   }
 
   private async openOrFocusOnce(): Promise<OpenFloatWindowResult> {
@@ -454,6 +513,10 @@ export class FloatWindowManager {
 
   /** Clear the session id when the window is reported closed. */
   async handleWindowRemoved(windowId: number): Promise<void> {
+    await this.runLifecycleMutation(() => this.handleWindowRemovedOnce(windowId));
+  }
+
+  private async handleWindowRemovedOnce(windowId: number): Promise<void> {
     const existing = await this.readSessionWindowId();
     if (existing === windowId) {
       try {
@@ -540,5 +603,14 @@ export class FloatWindowManager {
     } catch {
       return { ok: false, reason: 'chrome-api-failed' };
     }
+  }
+
+  private runLifecycleMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.lifecycleMutationQueue.then(operation, operation);
+    this.lifecycleMutationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 }
