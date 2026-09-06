@@ -317,17 +317,21 @@ export class FloatWindowManager {
   }
 
   async activePipSession(): Promise<PipSessionState | undefined> {
-    try {
-      const stored = await this.storage.session.get([PIP_SESSION_STORAGE_KEY]);
-      const raw = stored[PIP_SESSION_STORAGE_KEY];
-      const session = parsePipSession(raw);
-      if (session === undefined && raw !== undefined && raw !== -1) {
-        await this.clearPipSession();
-      }
-      return session;
-    } catch {
+    const state = await this.readLifecycleState();
+    if (!state.ok || state.pipSession === undefined) {
       return undefined;
     }
+
+    if (state.hostWindowId !== state.pipSession.hostWindowId) {
+      try {
+        await this.clearPipSession();
+      } catch {
+        // Reading the active session is best-effort and never rejects.
+      }
+      return undefined;
+    }
+
+    return state.pipSession;
   }
 
   async recoverStoredPipSession(): Promise<RecoverStoredPipSessionResult> {

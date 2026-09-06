@@ -120,6 +120,7 @@ function createHarness(options: {
 
   return {
     manager,
+    chrome,
     session,
     local,
     liveWindows,
@@ -469,6 +470,23 @@ describe('FloatWindowManager PiP session', () => {
     });
   });
 
+  it('rejects ready from a different host even when the session token matches', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await expect(harness.manager.markPipReady(hostWindowId + 1, 'pip-1')).resolves.toEqual({
+      ok: false,
+      reason: 'host-mismatch',
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-1',
+      hostWindowId,
+      phase: 'opened',
+    });
+    expect(harness.updateCalls).toHaveLength(0);
+  });
+
   it('clears a matching native-close session and restores the host', async () => {
     const harness = createHarness();
     const hostWindowId = await openHost(harness);
@@ -525,25 +543,55 @@ describe('FloatWindowManager PiP session', () => {
 
   it('parses a stored session after worker restart and clears invalid records', async () => {
     const validHarness = createHarness();
-    validHarness.session.seed({
-      [PIP_SESSION_STORAGE_KEY]: {
-        sessionId: 'pip-1',
-        hostWindowId: 42,
-        phase: 'ready',
-      },
+    const hostWindowId = await openHost(validHarness);
+    await validHarness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    await validHarness.manager.markPipReady(hostWindowId, 'pip-1');
+    const restartedManager = new FloatWindowManager(validHarness.chrome, {
+      session: validHarness.session,
+      local: validHarness.local,
     });
-    await expect(validHarness.manager.activePipSession()).resolves.toEqual({
+
+    await expect(restartedManager.activePipSession()).resolves.toEqual({
       sessionId: 'pip-1',
-      hostWindowId: 42,
+      hostWindowId,
       phase: 'ready',
     });
 
     const invalidHarness = createHarness();
+    const invalidHostWindowId = await openHost(invalidHarness);
     invalidHarness.session.seed({
-      [PIP_SESSION_STORAGE_KEY]: { sessionId: '', hostWindowId: 'bad', phase: 'ready' },
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: '',
+        hostWindowId: invalidHostWindowId,
+        phase: 'ready',
+      },
     });
-    await expect(invalidHarness.manager.activePipSession()).resolves.toBeUndefined();
+    const restartedInvalidManager = new FloatWindowManager(invalidHarness.chrome, {
+      session: invalidHarness.session,
+      local: invalidHarness.local,
+    });
+
+    await expect(restartedInvalidManager.activePipSession()).resolves.toBeUndefined();
     expect(invalidHarness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('clears a stored session whose host does not match the tracked host after restart', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    harness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-orphan',
+        hostWindowId: hostWindowId + 1,
+        phase: 'ready',
+      },
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.activePipSession()).resolves.toBeUndefined();
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
   });
 
   it('clears an orphaned stored session when its host is not tracked', async () => {
@@ -556,7 +604,12 @@ describe('FloatWindowManager PiP session', () => {
       },
     });
 
-    await expect(harness.manager.recoverStoredPipSession()).resolves.toEqual({
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
       ok: false,
       reason: 'host-mismatch',
     });
@@ -574,7 +627,12 @@ describe('FloatWindowManager PiP session', () => {
       },
     });
 
-    await expect(harness.manager.recoverStoredPipSession()).resolves.toEqual({
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
       ok: true,
       recovered: true,
     });
