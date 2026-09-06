@@ -792,7 +792,7 @@ describe('SurfaceSwitchCoordinator', () => {
     }
   });
 
-  it('settles and unlocks retry when transaction cleanup rejects', async () => {
+  it('settles but keeps retry blocked when transaction cleanup rejects', async () => {
     class FailingClearStorage extends MemoryStorage {
       failClears = true;
 
@@ -818,17 +818,20 @@ describe('SurfaceSwitchCoordinator', () => {
       target: 'sidepanel',
       sourceWindowId: 9,
     });
-    const settled = vi.fn();
-    void first.then(settled);
-    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-
-    expect(settled).toHaveBeenCalledWith({
+    await expect(first).resolves.toEqual({
       ok: false,
       switchId: 'cleanup-rejected',
       reason: 'target-open-failed',
     });
+    await expect(coordinator.request({
+      switchId: 'blocked-by-failed-cleanup',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    })).resolves.toMatchObject({ reason: 'switch-in-progress' });
 
     storage.failClears = false;
+    await expect(coordinator.bootstrap('sidepanel')).resolves.toBeUndefined();
     vi.mocked(operations.openSidePanel).mockResolvedValueOnce(true);
     const retry = coordinator.request({
       switchId: 'retry-after-cleanup-rejection',
@@ -1086,6 +1089,134 @@ describe('SurfaceSwitchCoordinator', () => {
       await vi.advanceTimersByTimeAsync(20);
       expect(operations.closeSidePanel).toHaveBeenCalledTimes(2);
       expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the main barrier while persisting target-closed and retries without reclosing', async () => {
+    vi.useFakeTimers();
+    try {
+      class RecoveringMainMarkerStorage extends MemoryStorage {
+        markerAttempts = 0;
+
+        override async set(items: Record<string, unknown>): Promise<void> {
+          const transaction = items[SURFACE_SWITCH_STORAGE_KEY] as
+            | { phase?: unknown }
+            | null
+            | undefined;
+          if (transaction?.phase === 'target-closed') {
+            this.markerAttempts += 1;
+            if (this.markerAttempts === 1) throw new Error('marker unavailable');
+          }
+          await super.set(items);
+        }
+      }
+      const storage = new RecoveringMainMarkerStorage();
+      storage.values.set(SURFACE_SWITCH_STORAGE_KEY, {
+        switchId: 'main-marker-retry',
+        source: 'floating',
+        target: 'sidepanel',
+        sourceWindowId: 9,
+        phase: 'closing-target',
+        startedAt: 0,
+      });
+      const operations: SurfaceOperations = {
+        openFloating: vi.fn(async () => true),
+        openSidePanel: vi.fn(async () => true),
+        closeFloating: vi.fn(async () => true),
+        closeSidePanel: vi.fn(async () => true),
+        saveDisplayMode: vi.fn(async () => {}),
+      };
+      const coordinator = new SurfaceSwitchCoordinator({
+        operations,
+        storage,
+        now: () => 1_000,
+        targetCloseRetryDelayMs: 20,
+        targetCloseRetryLimit: 1,
+      });
+
+      await coordinator.restore();
+      vi.advanceTimersByTime(20);
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+      expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+      expect(storage.markerAttempts).toBe(1);
+      await expect(coordinator.request({ ...toFloating, switchId: 'during-main-marker' }))
+        .resolves.toMatchObject({ reason: 'switch-in-progress' });
+
+      vi.advanceTimersByTime(20);
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      expect(storage.markerAttempts).toBe(2);
+      expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores a main target-closed tombstone by clearing it without reclosing the target', async () => {
+    vi.useFakeTimers();
+    try {
+      class RecoveringMainClearStorage extends MemoryStorage {
+        clearAttempts = 0;
+
+        override async set(items: Record<string, unknown>): Promise<void> {
+          if (items[SURFACE_SWITCH_STORAGE_KEY] === null) {
+            this.clearAttempts += 1;
+            if (this.clearAttempts === 1) throw new Error('clear unavailable');
+          }
+          await super.set(items);
+        }
+      }
+      const storage = new RecoveringMainClearStorage();
+      storage.values.set(SURFACE_SWITCH_STORAGE_KEY, {
+        switchId: 'main-clear-restart',
+        source: 'floating',
+        target: 'sidepanel',
+        sourceWindowId: 9,
+        phase: 'closing-target',
+        startedAt: 0,
+      });
+      const operations: SurfaceOperations = {
+        openFloating: vi.fn(async () => true),
+        openSidePanel: vi.fn(async () => true),
+        closeFloating: vi.fn(async () => true),
+        closeSidePanel: vi.fn(async () => true),
+        saveDisplayMode: vi.fn(async () => {}),
+      };
+      const firstWorker = new SurfaceSwitchCoordinator({
+        operations,
+        storage,
+        now: () => 1_000,
+        targetCloseRetryDelayMs: 1_000,
+        targetCloseRetryLimit: 1,
+      });
+
+      await firstWorker.restore();
+      await expect(firstWorker.bootstrap('sidepanel')).resolves.toMatchObject({
+        switchId: 'main-clear-restart',
+        phase: 'target-closed',
+      });
+      expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+        phase: 'target-closed',
+      });
+      await expect(firstWorker.request({ ...toFloating, switchId: 'during-main-clear' }))
+        .resolves.toMatchObject({ reason: 'switch-in-progress' });
+
+      const restarted = new SurfaceSwitchCoordinator({
+        operations,
+        storage,
+        now: () => 1_000,
+        targetCloseRetryDelayMs: 20,
+        targetCloseRetryLimit: 1,
+      });
+      await restarted.restore();
+      vi.advanceTimersByTime(20);
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      expect(storage.clearAttempts).toBe(2);
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+      expect(operations.closeSidePanel).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }
@@ -1557,6 +1688,90 @@ describe('SurfaceSwitchCoordinator', () => {
     await expect(trusted).resolves.toMatchObject({ ok: true });
   });
 
+  it('durably settles a trusted pre-open that closes after main persistence fails', async () => {
+    const releaseGet = deferred<void>();
+    class RecoveringOwnedCleanupStorage extends MemoryStorage {
+      atomicClearAttempts = 0;
+
+      override async get(keys: string[]): Promise<Record<string, unknown>> {
+        await releaseGet.promise;
+        return super.get(keys);
+      }
+
+      override async set(items: Record<string, unknown>): Promise<void> {
+        const main = items[SURFACE_SWITCH_STORAGE_KEY] as
+          | { phase?: unknown }
+          | null
+          | undefined;
+        if (main?.phase === 'opening') throw new Error('main persist unavailable');
+        if (
+          items[SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY] === null
+          && !Object.hasOwn(items, SURFACE_SWITCH_STORAGE_KEY)
+        ) throw new Error('detached clear unavailable');
+        if (
+          items[SURFACE_SWITCH_STORAGE_KEY] === null
+          && items[SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY] === null
+        ) {
+          this.atomicClearAttempts += 1;
+          if (this.atomicClearAttempts === 1) throw new Error('atomic clear unavailable');
+        }
+        await super.set(items);
+      }
+    }
+    const storage = new RecoveringOwnedCleanupStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({
+      operations,
+      storage,
+      now: () => 1_000,
+      targetCloseRetryDelayMs: 1_000,
+      targetCloseRetryLimit: 1,
+    });
+    const restoring = coordinator.restore();
+    const pending = coordinator.requestTrustedWhileRestoring({
+      switchId: 'owned-persist-failure',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    releaseGet.resolve();
+    await restoring;
+
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      switchId: 'owned-persist-failure',
+      reason: 'target-open-failed',
+    });
+    expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      phase: 'target-closed',
+    });
+    expect(storage.values.get(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY)).toMatchObject({
+      phase: 'target-closed',
+    });
+    await expect(coordinator.request({ ...toFloating, switchId: 'blocked-owned-clear' }))
+      .resolves.toMatchObject({ reason: 'switch-in-progress' });
+
+    const restarted = new SurfaceSwitchCoordinator({
+      operations,
+      storage,
+      now: () => 1_000,
+      targetCloseRetryDelayMs: 20,
+      targetCloseRetryLimit: 1,
+    });
+    await restarted.restore();
+    await expect(restarted.bootstrap('sidepanel')).resolves.toBeUndefined();
+    expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+    expect(storage.values.get(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY)).toBeNull();
+  });
+
   it('retains a detached cleanup barrier until its durable key is cleared', async () => {
     vi.useFakeTimers();
     try {
@@ -1733,7 +1948,7 @@ describe('SurfaceSwitchCoordinator', () => {
     }
   });
 
-  it('does not hydrate a detached-only phase as the main transaction', async () => {
+  it('restores a main target-closed transaction as the clear-only owner', async () => {
     vi.useFakeTimers();
     try {
       const { coordinator, operations, storage } = createHarness({
@@ -1752,13 +1967,16 @@ describe('SurfaceSwitchCoordinator', () => {
       storage.values.set(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY, targetClosed);
 
       await coordinator.restore();
-      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+        phase: 'target-closed',
+      });
+      expect(storage.values.get(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY)).toBeNull();
       await expect(coordinator.request({ ...toFloating, switchId: 'while-clear-only' }))
         .resolves.toMatchObject({ reason: 'switch-in-progress' });
 
       vi.advanceTimersByTime(20);
       for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
-      expect(storage.values.get(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY)).toBeNull();
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
       expect(operations.closeSidePanel).not.toHaveBeenCalled();
 
       const pending = coordinator.request({ ...toFloating, switchId: 'after-clear-only' });
