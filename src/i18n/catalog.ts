@@ -264,6 +264,19 @@ export const EN_MESSAGES = {
   'translation.setup.unavailable': 'Local translation is unavailable in this Chrome profile',
   'translation.setup.failed': 'Local translation initialization failed',
 
+  // Always-on-top floating surface
+  'floating.activate': 'Keep floating window on top',
+  'floating.alwaysOnTop': 'Always on top',
+  'floating.opening': 'Opening always-on-top window…',
+  'floating.active': 'Always-on-top window is active',
+  'floating.retry': 'Try again',
+  'floating.reopen': 'Reopen always-on-top window',
+  'floating.recovery': 'The always-on-top window was closed. Reopen it or return to the Side Panel.',
+  'floating.error': 'The always-on-top window could not be opened. You can try again.',
+  'floating.unsupportedTitle': 'Always-on-top window unavailable',
+  'floating.unsupportedBody': 'Always-on-top mode requires Chrome 141+ with Document Picture-in-Picture enabled.',
+  'floating.returnToSidePanel': 'Return to Side Panel',
+
   // Unsupported fallback page
   'unsupported.title': 'Side Panel unavailable',
   'unsupported.body':
@@ -516,6 +529,19 @@ export const ZH_MESSAGES: Record<MessageKey, string> = {
   'translation.setup.activation-required': '请切换到 Fomo 页面并点击任意位置，继续初始化本地翻译',
   'translation.setup.unavailable': '当前 Chrome 配置不支持本地翻译',
   'translation.setup.failed': '本地翻译初始化失败',
+
+  // Always-on-top floating surface
+  'floating.activate': '将悬浮窗保持在最前',
+  'floating.alwaysOnTop': '始终置顶',
+  'floating.opening': '正在打开始终置顶窗口…',
+  'floating.active': '始终置顶窗口已启用',
+  'floating.retry': '重试',
+  'floating.reopen': '重新打开始终置顶窗口',
+  'floating.recovery': '始终置顶窗口已关闭。您可以重新打开，或返回侧边栏。',
+  'floating.error': '无法打开始终置顶窗口。您可以重试。',
+  'floating.unsupportedTitle': '始终置顶窗口不可用',
+  'floating.unsupportedBody': '始终置顶模式需要 Chrome 141+ 并启用文档画中画功能。',
+  'floating.returnToSidePanel': '返回侧边栏',
 
   // Unsupported fallback page
   'unsupported.title': '侧边栏不可用',

@@ -145,16 +145,22 @@ export interface SidePanelDependencies {
    * window restores it on the next open). Defaults to `sidepanel`, which
    * reports nothing.
    */
-  surface?: 'sidepanel' | 'floatpanel';
+  surface?: 'sidepanel' | 'floatpanel' | 'pip';
 }
 
-export function SidePanelApp(props: { deps: SidePanelDependencies }) {
-  const { deps } = props;
+export interface SidePanelAppProps {
+  deps: SidePanelDependencies;
+  /** Reports the installed initial feed snapshot exactly once per mount. */
+  onFeedReady?: (eventWatermark: number) => void;
+}
+
+export function SidePanelApp(props: SidePanelAppProps) {
+  const { deps, onFeedReady } = props;
   const runtime = deps.runtime;
   const now = deps.now;
   const variant = deps.variant ?? 'sidepanel';
   const surface = deps.surface ?? 'sidepanel';
-  const surfaceKey: SurfaceKey = surface === 'floatpanel' ? 'floating' : 'sidepanel';
+  const surfaceKey: SurfaceKey = surface === 'sidepanel' ? 'sidepanel' : 'floating';
   const showFeedControls = variant === 'popup';
   const { translate } = useLocale();
 
@@ -592,6 +598,33 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
       readEnabled: connectionState === 'connected',
     },
   );
+
+  const feedEventsRef = useRef(feed.events);
+  feedEventsRef.current = feed.events;
+  const didReportFeedReadyRef = useRef(false);
+  useEffect(() => {
+    if (
+      feed.status !== 'ready'
+      || onFeedReady === undefined
+      || didReportFeedReadyRef.current
+    ) {
+      return;
+    }
+
+    // useEventFeed installs its displayed snapshot in an effect after the
+    // query resolves. Defer one task so the callback observes that committed
+    // snapshot rather than the preceding loading render.
+    const timer = setTimeout(() => {
+      if (didReportFeedReadyRef.current) return;
+      didReportFeedReadyRef.current = true;
+      onFeedReady(feedEventsRef.current.reduce(
+        (latest, event) => Math.max(latest, event.occurredAt),
+        0,
+      ));
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [feed.status, onFeedReady]);
 
   // The coordinator opens a new target surface. It acknowledges the active
   // transaction only after the initial history snapshot and live listener
