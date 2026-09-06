@@ -147,15 +147,17 @@ interface DurableTargetCleanup {
   durableClearRetriesRemaining: number;
 }
 
-type AbandonedTargetReconcileOutcome = 'reconciled' | 'superseded';
+type AbandonedTargetClaimOutcome = 'reconciled' | 'superseded' | 'target-changed';
+type AbandonedTargetReconcileOutcome = 'reconciled' | 'superseded' | 'retry';
 
 interface AbandonedTargetClaim {
   transaction: SwitchTransaction;
   surface: SurfaceKey;
   identity: SurfaceInstanceIdentity;
+  epoch: number;
   state: 'checking-source' | 'cleaning-target';
   superseded: boolean;
-  promise: Promise<AbandonedTargetReconcileOutcome> | undefined;
+  promise: Promise<AbandonedTargetClaimOutcome> | undefined;
 }
 
 const TRANSACTION_KEYS = [
@@ -540,6 +542,20 @@ export class SurfaceSwitchCoordinator {
     surface: SurfaceKey,
     identity?: SurfaceInstanceIdentity,
   ): Promise<SwitchTransaction | undefined> {
+    if (
+      this.active === undefined
+      && this.restored === undefined
+      && this.detachedTargetCleanup === undefined
+      && this.abandonedTargetClaim?.surface === surface
+      && identity !== undefined
+      && this.abandonedMatches(surface, identity)
+    ) {
+      const abandonedOutcome = await this.reconcileAbandonedTarget(surface, identity);
+      if (abandonedOutcome === 'superseded' || abandonedOutcome === 'retry') {
+        return this.bootstrap(surface, identity);
+      }
+      return undefined;
+    }
     if (this.detachedTargetCleanup?.transaction.target === surface) {
       const cleanup = this.detachedTargetCleanup;
       if (!await this.bindDetachedPendingIdentity(cleanup, identity)) return undefined;
@@ -642,7 +658,9 @@ export class SurfaceSwitchCoordinator {
     }
     if (transaction?.target === surface) return transaction;
     const abandonedOutcome = await this.reconcileAbandonedTarget(surface, identity);
-    if (abandonedOutcome === 'superseded') return this.bootstrap(surface, identity);
+    if (abandonedOutcome === 'superseded' || abandonedOutcome === 'retry') {
+      return this.bootstrap(surface, identity);
+    }
     return undefined;
   }
 
@@ -1585,23 +1603,48 @@ export class SurfaceSwitchCoordinator {
       || !this.abandonedMatches(surface, identity)
     ) return 'reconciled';
     const existingClaim = this.abandonedTargetClaim;
-    if (existingClaim !== undefined) return existingClaim.promise!;
+    if (existingClaim !== undefined) {
+      if (!this.sameSurfaceIdentity(existingClaim.identity, identity)) {
+        existingClaim.identity = { ...identity };
+        existingClaim.epoch += 1;
+      }
+      const outcome = await existingClaim.promise!;
+      if (
+        outcome === 'target-changed'
+        && this.sameSurfaceIdentity(existingClaim.identity, identity)
+      ) return 'retry';
+      return outcome === 'target-changed' ? 'reconciled' : outcome;
+    }
     const claim: AbandonedTargetClaim = {
       transaction: abandoned,
       surface,
       identity,
+      epoch: 0,
       state: 'checking-source',
       superseded: false,
       promise: undefined,
     };
-    const operation = this.reconcileClaimedAbandonedTarget(claim, expectedTarget);
+    const operation = this.reconcileClaimedAbandonedTarget(claim);
     claim.promise = operation;
     this.abandonedTargetClaim = claim;
     try {
-      return await operation;
+      const outcome = await operation;
+      if (
+        outcome === 'target-changed'
+        && this.sameSurfaceIdentity(claim.identity, identity)
+      ) return 'retry';
+      return outcome === 'target-changed' ? 'reconciled' : outcome;
     } finally {
       if (this.abandonedTargetClaim === claim) this.abandonedTargetClaim = undefined;
     }
+  }
+
+  private sameSurfaceIdentity(
+    left: SurfaceInstanceIdentity,
+    right: SurfaceInstanceIdentity,
+  ): boolean {
+    return left.hostWindowId === right.hostWindowId
+      && left.instanceToken === right.instanceToken;
   }
 
   private requestCanSupersedeAbandonedClaim(
@@ -1618,8 +1661,7 @@ export class SurfaceSwitchCoordinator {
 
   private async reconcileClaimedAbandonedTarget(
     claim: AbandonedTargetClaim,
-    expectedTarget: FloatingSurfaceIdentity | PendingSidePanelIdentity,
-  ): Promise<AbandonedTargetReconcileOutcome> {
+  ): Promise<AbandonedTargetClaimOutcome> {
     const abandoned = claim.transaction;
     const sourceLive = await this.options.operations.isSourceLive?.(abandoned) ?? false;
     if (claim.superseded) return 'superseded';
@@ -1633,28 +1675,64 @@ export class SurfaceSwitchCoordinator {
       }
       return 'reconciled';
     }
-    const cleanup = {
+    for (
+      let replacementAttempts = 0;
+      replacementAttempts <= this.targetCloseRetryLimit;
+      replacementAttempts += 1
+    ) {
+      const cleanupEpoch = claim.epoch;
+      const cleanup = {
+        ...abandoned,
+        targetIdentity: { ...claim.identity },
+      };
+      try {
+        await this.options.storage.set({
+          [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: cleanup,
+        });
+      } catch {
+        return 'reconciled';
+      }
+      this.abandonedTarget = cleanup;
+      const closed = await this.closeTarget(cleanup);
+      if (claim.epoch !== cleanupEpoch) {
+        await this.persistCurrentAbandonedTarget(claim, abandoned);
+        if (replacementAttempts < this.targetCloseRetryLimit) continue;
+        return 'target-changed';
+      }
+      if (!closed) return 'reconciled';
+      try {
+        await this.clearAbandonedStored();
+        if (claim.epoch !== cleanupEpoch) {
+          await this.persistCurrentAbandonedTarget(claim, abandoned);
+          if (replacementAttempts < this.targetCloseRetryLimit) continue;
+          return 'target-changed';
+        }
+        if (this.abandonedTarget === cleanup) this.abandonedTarget = undefined;
+      } catch {
+        // The guarded target is closed; retain only non-blocking bookkeeping.
+      }
+      return 'reconciled';
+    }
+    return 'target-changed';
+  }
+
+  private async persistCurrentAbandonedTarget(
+    claim: AbandonedTargetClaim,
+    abandoned: SwitchTransaction,
+  ): Promise<void> {
+    const replacement = {
       ...abandoned,
-      targetIdentity: hasInstanceToken(expectedTarget)
-        ? expectedTarget
-        : { ...claim.identity },
+      targetIdentity: { ...claim.identity },
     };
     try {
       await this.options.storage.set({
-        [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: cleanup,
+        [SURFACE_SWITCH_ABANDONED_TARGET_STORAGE_KEY]: replacement,
       });
+      this.abandonedTarget = replacement;
     } catch {
-      return 'reconciled';
+      // The next bootstrap retries the current generation from memory.
+      this.abandonedTarget = replacement;
     }
-    this.abandonedTarget = cleanup;
-    if (!await this.closeTarget(cleanup)) return 'reconciled';
-    try {
-      await this.clearAbandonedStored();
-      if (this.abandonedTarget === cleanup) this.abandonedTarget = undefined;
-    } catch {
-      // The guarded target is closed; retain only non-blocking bookkeeping.
-    }
-    return 'reconciled';
   }
 
   private markDetachedTargetClosed(cleanup: DetachedTargetCleanup): Promise<boolean> {
