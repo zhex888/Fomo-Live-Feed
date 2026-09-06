@@ -90,8 +90,11 @@ export type OpenFloatWindowResult =
   | { ok: false; reason: 'chrome-api-failed' };
 
 export type RegisterPipOpenedResult =
-  | { ok: true; created: boolean }
-  | { ok: false; reason: 'host-mismatch' | 'session-conflict' | 'chrome-api-failed' };
+  | { ok: true; created: boolean; ownerWindowId: number }
+  | {
+    ok: false;
+    reason: 'host-mismatch' | 'owner-missing' | 'session-conflict' | 'chrome-api-failed';
+  };
 
 export type MarkPipReadyResult =
   | { ok: true; minimized: boolean }
@@ -143,6 +146,7 @@ type LifecycleStateResult =
   | {
     ok: true;
     hostWindowId: number | undefined;
+    ownerWindowId: number | undefined;
     pipSession: PipSessionState | undefined;
     pipSessionRecord: 'absent' | 'invalid' | 'valid';
   }
@@ -256,6 +260,54 @@ export class FloatWindowManager {
       && this.pipSessionCache.sessionId === sessionId;
   }
 
+  /** Match every capability needed for a synchronous PiP return. */
+  cachedPipReturnContextMatches(
+    hostWindowId: number,
+    sessionId: string,
+    ownerWindowId: number,
+  ): boolean {
+    return this.cachedPipSessionMatches(hostWindowId, sessionId)
+      && this.ownerWindowIdCache === ownerWindowId;
+  }
+
+  /**
+   * Admit one sender-bound cold-wake return without touching storage. The
+   * caller must first validate the dedicated float-host sender boundary.
+   */
+  adoptTrustedColdReturnContext(
+    hostWindowId: number,
+    sessionId: string,
+    ownerWindowId: number,
+  ): boolean {
+    if (
+      !Number.isInteger(hostWindowId)
+      || hostWindowId < 0
+      || sessionId.length === 0
+      || !Number.isInteger(ownerWindowId)
+      || ownerWindowId < 0
+    ) {
+      return false;
+    }
+    if (this.cachedPipReturnContextMatches(hostWindowId, sessionId, ownerWindowId)) {
+      return true;
+    }
+    if (
+      (this.pipSessionCache !== undefined
+        && !this.cachedPipSessionMatches(hostWindowId, sessionId))
+      || (this.ownerWindowIdCache !== undefined
+        && this.ownerWindowIdCache !== ownerWindowId)
+    ) {
+      return false;
+    }
+
+    if (this.pipSessionCache === undefined) {
+      this.pipSessionCache = { sessionId, hostWindowId, phase: 'ready' };
+      this.pipSessionCacheConfirmed = false;
+    }
+    this.ownerWindowIdCache ??= ownerWindowId;
+    return true;
+  }
+
   async registerPipOpened(
     hostWindowId: number,
     sessionId: string,
@@ -272,6 +324,9 @@ export class FloatWindowManager {
     if (state.hostWindowId !== hostWindowId) {
       return { ok: false, reason: 'host-mismatch' };
     }
+    if (state.ownerWindowId === undefined) {
+      return { ok: false, reason: 'owner-missing' };
+    }
     if (sessionId.length === 0) {
       return { ok: false, reason: 'session-conflict' };
     }
@@ -283,7 +338,7 @@ export class FloatWindowManager {
       ) {
         this.pipSessionCache = { ...state.pipSession };
         this.pipSessionCacheConfirmed = true;
-        return { ok: true, created: false };
+        return { ok: true, created: false, ownerWindowId: state.ownerWindowId };
       }
       if (
         this.pipSessionCache !== undefined
@@ -294,7 +349,7 @@ export class FloatWindowManager {
       ) {
         try {
           await this.writePipSession({ sessionId, hostWindowId, phase: 'opened' });
-          return { ok: true, created: true };
+          return { ok: true, created: true, ownerWindowId: state.ownerWindowId };
         } catch {
           return { ok: false, reason: 'chrome-api-failed' };
         }
@@ -304,7 +359,7 @@ export class FloatWindowManager {
 
     try {
       await this.writePipSession({ sessionId, hostWindowId, phase: 'opened' });
-      return { ok: true, created: true };
+      return { ok: true, created: true, ownerWindowId: state.ownerWindowId };
     } catch {
       return { ok: false, reason: 'chrome-api-failed' };
     }
@@ -689,7 +744,7 @@ export class FloatWindowManager {
         await this.clearPipSession();
       }
 
-      return { ok: true, hostWindowId, pipSession, pipSessionRecord };
+      return { ok: true, hostWindowId, ownerWindowId, pipSession, pipSessionRecord };
     } catch {
       return { ok: false, reason: 'chrome-api-failed' };
     }

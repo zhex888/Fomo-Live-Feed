@@ -35,6 +35,7 @@ export interface FloatingSurfaceHostProps {
 interface ActiveSession {
   id: string;
   hostWindowId?: number;
+  ownerWindowId?: number;
   pipWindow?: Window;
   cleanup?: () => void;
   readyInFlight: boolean;
@@ -48,11 +49,23 @@ interface ActiveSession {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const isOpenedResponse = (value: unknown): boolean =>
+interface OpenedResponse {
+  ok: true;
+  created: boolean;
+  ownerWindowId: number;
+}
+
+const isOpenedResponse = (value: unknown): value is OpenedResponse =>
   isRecord(value)
-  && Object.keys(value).every((key) => key === 'ok' || key === 'created')
+  && Object.keys(value).length === 3
+  && Object.keys(value).every((key) => (
+    key === 'ok' || key === 'created' || key === 'ownerWindowId'
+  ))
   && value.ok === true
-  && typeof value.created === 'boolean';
+  && typeof value.created === 'boolean'
+  && typeof value.ownerWindowId === 'number'
+  && Number.isInteger(value.ownerWindowId)
+  && value.ownerWindowId >= 0;
 
 const isReadyResponse = (value: unknown): boolean =>
   isRecord(value)
@@ -206,7 +219,10 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
           payload: { sessionId: session.id, hostWindowId },
         });
         const openedAccepted = isOpenedResponse(opened);
-        if (openedAccepted) session.opened = true;
+        if (openedAccepted) {
+          session.opened = true;
+          session.ownerWindowId = opened.ownerWindowId;
+        }
         if (
           !openedAccepted
           || sessionRef.current !== session
@@ -287,6 +303,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
                 payload: {
                   sessionId: session.id,
                   hostWindowId,
+                  ownerWindowId: session.ownerWindowId,
                   switchId: newId('switch'),
                 },
               }).catch(() => {});

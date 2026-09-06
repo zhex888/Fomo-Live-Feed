@@ -621,6 +621,7 @@ describe('protocol', () => {
           payload: {
             sessionId: 'pip-session-1',
             hostWindowId: 500,
+            ownerWindowId: 77,
             switchId: 'switch-1',
           },
         },
@@ -682,7 +683,7 @@ describe('protocol', () => {
         {
           protocolVersion: 1,
           type: 'pip.returnToSidePanel',
-          payload: { sessionId: 'pip-session-1', hostWindowId: 500 },
+          payload: { sessionId: 'pip-session-1', hostWindowId: 500, switchId: 'switch-1' },
         },
         {
           protocolVersion: 1,
@@ -690,7 +691,29 @@ describe('protocol', () => {
           payload: {
             sessionId: 'pip-session-1',
             hostWindowId: 500,
+            ownerWindowId: 77,
             switchId: 'x'.repeat(129),
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.returnToSidePanel',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            ownerWindowId: -1,
+            switchId: 'switch-1',
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.returnToSidePanel',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            ownerWindowId: 77,
+            switchId: 'switch-1',
+            extra: true,
           },
         },
       ];

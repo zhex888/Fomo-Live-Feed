@@ -94,7 +94,7 @@ function createHarness(surface: 'sidepanel' | 'floatpanel' | 'pip') {
           return { ok: true, state: SYNC_CURRENT };
         }
         if (type === 'pip.opened') {
-          return { ok: true, created: true };
+          return { ok: true, created: true, ownerWindowId: 77 };
         }
         if (type === 'pip.ready') {
           return { ok: true, minimized: false };
@@ -420,6 +420,65 @@ describe('FloatingSurfaceHost', () => {
     });
   });
 
+  it('returns from PiP with the owner issued by the opened response', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 73;
+    const pip = createPipWindow();
+    let mountedFeed: PipFeedRootOptions | undefined;
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={(options) => {
+          mountedFeed = options;
+          return vi.fn();
+        }}
+        createSessionId={() => 'session-with-owner'}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(mountedFeed).toBeDefined());
+
+    act(() => mountedFeed?.onReturnToSidePanel());
+
+    expect(harness.sentMessages()).toContainEqual({
+      protocolVersion: 1,
+      type: 'pip.returnToSidePanel',
+      payload: {
+        sessionId: 'session-with-owner',
+        hostWindowId: 73,
+        ownerWindowId: 77,
+        switchId: expect.any(String),
+      },
+    });
+  });
+
+  it('rejects a pip.opened response with extra owner context fields', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 73;
+    harness.setResponse('pip.opened', {
+      ok: true,
+      created: true,
+      ownerWindowId: 77,
+      extra: true,
+    });
+    const pip = createPipWindow();
+    const mountPipFeed = vi.fn<MountPipFeed>();
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={mountPipFeed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+
+    expect(await screen.findByRole('button', {
+      name: 'Reopen always-on-top window',
+    })).toBeEnabled();
+    expect(mountPipFeed).not.toHaveBeenCalled();
+  });
+
   it('gives the mounted PiP feed sole read ownership during visual overlap', async () => {
     const harness = createHarness('floatpanel');
     harness.deps.getCurrentWindowId = async () => 74;
@@ -597,7 +656,7 @@ describe('FloatingSurfaceHost', () => {
     ));
 
     act(() => pip.dispatchPageHide());
-    opened.resolve({ ok: true, created: true });
+    opened.resolve({ ok: true, created: true, ownerWindowId: 77 });
     await act(async () => {
       await opened.promise;
       await Promise.resolve();
@@ -618,7 +677,9 @@ describe('FloatingSurfaceHost', () => {
     let openedCalls = 0;
     harness.setResponse('pip.opened', () => {
       openedCalls += 1;
-      return openedCalls === 1 ? opened.promise : { ok: true, created: true };
+      return openedCalls === 1
+        ? opened.promise
+        : { ok: true, created: true, ownerWindowId: 77 };
     });
     const firstPip = createPipWindow();
     const secondPip = createPipWindow();
@@ -649,7 +710,7 @@ describe('FloatingSurfaceHost', () => {
     fireEvent.click(reopen);
     expect(requestWindow).toHaveBeenCalledTimes(1);
 
-    opened.resolve({ ok: true, created: true });
+    opened.resolve({ ok: true, created: true, ownerWindowId: 77 });
     await act(async () => {
       await opened.promise;
       await Promise.resolve();

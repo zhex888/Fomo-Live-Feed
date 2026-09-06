@@ -541,7 +541,7 @@ describe('FloatWindowManager owner window', () => {
 
 describe('FloatWindowManager PiP session', () => {
   async function openHost(harness: ReturnType<typeof createHarness>): Promise<number> {
-    const opened = await harness.manager.openOrFocus();
+    const opened = await harness.manager.openOrFocus(77);
     if (!opened.ok) throw new Error('expected open');
     return opened.windowId;
   }
@@ -559,12 +559,52 @@ describe('FloatWindowManager PiP session', () => {
     await expect(harness.manager.registerPipOpened(hostWindowId, 'pip-1')).resolves.toEqual({
       ok: true,
       created: true,
+      ownerWindowId: 77,
     });
     expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toEqual({
       sessionId: 'pip-1',
       hostWindowId,
       phase: 'opened',
     });
+  });
+
+  it('returns the original owner and rejects registration when it is missing', async () => {
+    const harness = createHarness();
+    const opened = await harness.manager.openOrFocus();
+    if (!opened.ok) throw new Error('expected open');
+
+    await expect(
+      harness.manager.registerPipOpened(opened.windowId, 'pip-without-owner'),
+    ).resolves.toEqual({ ok: false, reason: 'owner-missing' });
+    expect(harness.session.snapshot()).not.toHaveProperty(PIP_SESSION_STORAGE_KEY);
+  });
+
+  it('adopts one trusted cold return context without overwriting a different cache', async () => {
+    const harness = createHarness();
+
+    expect(harness.manager.adoptTrustedColdReturnContext(900, 'pip-cold', 77)).toBe(true);
+    expect(harness.manager.cachedPipReturnContextMatches(900, 'pip-cold', 77)).toBe(true);
+    expect(harness.manager.adoptTrustedColdReturnContext(900, 'pip-other', 77)).toBe(false);
+    expect(harness.manager.adoptTrustedColdReturnContext(900, 'pip-cold', 88)).toBe(false);
+    expect(harness.manager.cachedPipReturnContextMatches(900, 'pip-cold', 77)).toBe(true);
+    expect(harness.session.snapshot()).not.toHaveProperty(PIP_SESSION_STORAGE_KEY);
+  });
+
+  it('never overwrites a confirmed live session with a cold return context', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-live');
+
+    expect(
+      harness.manager.adoptTrustedColdReturnContext(hostWindowId, 'pip-stale', 77),
+    ).toBe(false);
+    expect(
+      harness.manager.adoptTrustedColdReturnContext(hostWindowId, 'pip-live', 77),
+    ).toBe(true);
+    await expect(
+      harness.manager.registerPipOpened(hostWindowId, 'pip-stale'),
+    ).resolves.toEqual({ ok: false, reason: 'session-conflict' });
+    expect(harness.manager.cachedPipReturnContextMatches(hostWindowId, 'pip-live', 77)).toBe(true);
   });
 
   it('rejects a second active session but treats the same registration as idempotent', async () => {
@@ -579,6 +619,7 @@ describe('FloatWindowManager PiP session', () => {
     await expect(harness.manager.registerPipOpened(hostWindowId, 'pip-1')).resolves.toEqual({
       ok: true,
       created: false,
+      ownerWindowId: 77,
     });
     expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
       sessionId: 'pip-1',
@@ -615,7 +656,7 @@ describe('FloatWindowManager PiP session', () => {
     releaseFirstPipWrite?.();
 
     await expect(Promise.all([first, second])).resolves.toEqual([
-      { ok: true, created: true },
+      { ok: true, created: true, ownerWindowId: 77 },
       { ok: false, reason: 'session-conflict' },
     ]);
   });
@@ -1025,7 +1066,7 @@ describe('FloatWindowManager PiP session', () => {
     ).resolves.toEqual({ ok: false, reason: 'session-conflict' });
     await expect(
       restartedManager.registerPipOpened(hostWindowId, 'pip-new'),
-    ).resolves.toEqual({ ok: true, created: true });
+    ).resolves.toEqual({ ok: true, created: true, ownerWindowId: 77 });
     expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
       sessionId: 'pip-new',
       phase: 'opened',
@@ -1048,7 +1089,7 @@ describe('FloatWindowManager PiP session', () => {
 
     await expect(
       restartedManager.registerPipOpened(hostWindowId, 'pip-live'),
-    ).resolves.toEqual({ ok: true, created: false });
+    ).resolves.toEqual({ ok: true, created: false, ownerWindowId: 77 });
     await expect(
       restartedManager.registerPipOpened(hostWindowId, 'pip-other'),
     ).resolves.toEqual({ ok: false, reason: 'session-conflict' });

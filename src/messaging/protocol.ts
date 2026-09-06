@@ -277,6 +277,7 @@ const pipClosedPayloadSchema = pipSessionPayloadSchema.extend({
 });
 
 const pipReturnToSidePanelPayloadSchema = pipSessionPayloadSchema.extend({
+  ownerWindowId: z.number().int().nonnegative(),
   switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
 });
 

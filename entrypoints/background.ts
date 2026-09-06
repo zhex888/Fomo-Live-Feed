@@ -649,11 +649,20 @@ export default defineBackground(() => {
     now: () => Date.now(),
   });
 
+  let pipRuntimeStateHydrated = false;
+  const hydratePipRuntimeState = async (): Promise<void> => {
+    try {
+      await floatWindowManager.recoverStoredPipSession();
+    } finally {
+      pipRuntimeStateHydrated = true;
+    }
+  };
+
   const bootstrap = async (): Promise<void> => {
-    // Validate the tracked host and hydrate owner/PiP caches before accepting
-    // messages. A surviving PiP can then return synchronously without losing
-    // Chrome's user activation; the next lifecycle message confirms it live.
-    await floatWindowManager.recoverStoredPipSession();
+    // Hydrate persisted capability caches without delaying listener setup.
+    // A trusted float host can supply its issued context while this is pending,
+    // preserving Chrome's synchronous user-activation boundary.
+    await hydratePipRuntimeState();
 
     // Seed the display mode before wiring the action behavior so the action
     // routes to the right surface from the very first click.
@@ -899,11 +908,20 @@ export default defineBackground(() => {
             message.payload.reason,
           );
         case 'pip.returnToSidePanel': {
-          const { hostWindowId, sessionId, switchId } = message.payload;
-          if (!floatWindowManager.cachedPipSessionMatches(hostWindowId, sessionId)) {
-            // Never await storage before sidePanel.open: after a worker restart
-            // an empty cache is rejected honestly and recovery repairs storage.
-            void floatWindowManager.recoverStoredPipSession().catch(() => {});
+          const { hostWindowId, sessionId, ownerWindowId, switchId } = message.payload;
+          const cachedMatch = floatWindowManager.cachedPipReturnContextMatches(
+            hostWindowId,
+            sessionId,
+            ownerWindowId,
+          );
+          const coldMatch = !cachedMatch
+            && !pipRuntimeStateHydrated
+            && floatWindowManager.adoptTrustedColdReturnContext(
+              hostWindowId,
+              sessionId,
+              ownerWindowId,
+            );
+          if (!cachedMatch && !coldMatch) {
             return {
               ok: false as const,
               switchId,
