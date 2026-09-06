@@ -467,6 +467,51 @@ describe('FloatWindowManager.close', () => {
     expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(reopened.windowId);
     expect(harness.liveWindows.has(reopened.windowId)).toBe(true);
   });
+
+  it('starts a new owned open after a close barrier instead of reusing the stalled request', async () => {
+    let releaseFirstHostWrite: (() => void) | undefined;
+    let signalFirstHostWrite: (() => void) | undefined;
+    const firstHostWriteStarted = new Promise<void>((resolve) => {
+      signalFirstHostWrite = resolve;
+    });
+    const firstHostWriteGate = new Promise<void>((resolve) => {
+      releaseFirstHostWrite = resolve;
+    });
+    let gated = false;
+    const harness = createHarness({
+      async beforeSessionSet(items) {
+        const value = items[FLOAT_WINDOW_ID_SESSION_KEY];
+        if (!gated && typeof value === 'number' && value >= 0) {
+          gated = true;
+          signalFirstHostWrite?.();
+          await firstHostWriteGate;
+        }
+      },
+    });
+
+    const firstOpen = harness.manager.openOrFocus(11);
+    await firstHostWriteStarted;
+    const close = harness.manager.close();
+    const secondOpen = harness.manager.openOrFocus(22);
+    expect(secondOpen).not.toBe(firstOpen);
+    releaseFirstHostWrite?.();
+
+    const first = await firstOpen;
+    if (!first.ok) throw new Error('expected first open');
+    await expect(close).resolves.toBe(true);
+    const second = await secondOpen;
+    if (!second.ok) throw new Error('expected second open');
+
+    expect(second.created).toBe(true);
+    expect(second.windowId).not.toBe(first.windowId);
+    expect(harness.removeCalls).toEqual([first.windowId]);
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: second.windowId,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 22,
+    });
+    expect(harness.liveWindows.has(first.windowId)).toBe(false);
+    expect(harness.liveWindows.has(second.windowId)).toBe(true);
+  });
 });
 
 describe('FloatWindowManager owner window', () => {

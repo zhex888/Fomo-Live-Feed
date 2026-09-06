@@ -432,6 +432,7 @@ export class FloatWindowManager {
 
   /** Close the tracked floating window. Missing/stale windows are already closed. */
   async close(): Promise<boolean> {
+    this.openRequest = undefined;
     return this.runLifecycleMutation(() => this.closeOnce());
   }
 
@@ -528,6 +529,7 @@ export class FloatWindowManager {
 
   /** Clear the session id when the window is reported closed. */
   async handleWindowRemoved(windowId: number): Promise<void> {
+    this.openRequest = undefined;
     await this.runLifecycleMutation(() => this.handleWindowRemovedOnce(windowId));
   }
 
