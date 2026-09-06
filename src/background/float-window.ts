@@ -30,6 +30,13 @@ export const FLOAT_GEOMETRY_STORAGE_KEY = 'floatWindow.geometry.v1';
 /** The session key holding the live float window id across worker restarts. */
 export const FLOAT_WINDOW_ID_SESSION_KEY = 'floatWindow.windowId';
 export const FLOAT_OWNER_WINDOW_ID_SESSION_KEY = 'floatWindow.ownerWindowId';
+export const PIP_SESSION_STORAGE_KEY = 'floatWindow.pipSession.v1';
+
+export interface PipSessionState {
+  sessionId: string;
+  hostWindowId: number;
+  phase: 'opened' | 'ready';
+}
 
 interface ChromeWindowSnapshot {
   id?: number | undefined;
@@ -51,7 +58,13 @@ export interface FloatWindowChrome {
       focused: true;
     }): Promise<ChromeWindowSnapshot>;
     get(windowId: number): Promise<ChromeWindowSnapshot>;
-    update(windowId: number, update: { focused: true }): Promise<unknown>;
+    update(
+      windowId: number,
+      update:
+        | { focused: true }
+        | { state: 'minimized' }
+        | { state: 'normal'; focused: true },
+    ): Promise<unknown>;
     remove(windowId: number): Promise<void>;
   };
   runtime: {
@@ -74,11 +87,55 @@ export type OpenFloatWindowResult =
   | { ok: true; windowId: number; created: boolean }
   | { ok: false; reason: 'chrome-api-failed' };
 
+export type RegisterPipOpenedResult =
+  | { ok: true; created: boolean }
+  | { ok: false; reason: 'host-mismatch' | 'session-conflict' | 'chrome-api-failed' };
+
+export type MarkPipReadyResult =
+  | { ok: true; minimized: boolean }
+  | { ok: false; reason: 'host-mismatch' | 'session-mismatch' | 'chrome-api-failed' };
+
+export type HandlePipClosedResult =
+  | { ok: true; restored: boolean }
+  | { ok: false; reason: 'host-mismatch' | 'session-mismatch' | 'chrome-api-failed' };
+
+export type RecoverStoredPipSessionResult =
+  | { ok: true; recovered: boolean }
+  | { ok: false; reason: 'host-mismatch' | 'host-missing' | 'chrome-api-failed' };
+
 const isFinitePositive = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0;
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
+
+const parsePipSession = (value: unknown): PipSessionState | undefined => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.sessionId !== 'string'
+    || record.sessionId.length === 0
+    || typeof record.hostWindowId !== 'number'
+    || !Number.isInteger(record.hostWindowId)
+    || record.hostWindowId < 0
+    || (record.phase !== 'opened' && record.phase !== 'ready')
+  ) {
+    return undefined;
+  }
+
+  return {
+    sessionId: record.sessionId,
+    hostWindowId: record.hostWindowId,
+    phase: record.phase,
+  };
+};
+
+type LifecycleStateResult =
+  | { ok: true; hostWindowId: number | undefined; pipSession: PipSessionState | undefined }
+  | { ok: false; reason: 'chrome-api-failed' };
 
 /** Parse a stored geometry record; invalid fields fall back to defaults. */
 export function parseFloatGeometry(value: unknown): FloatWindowGeometry {
@@ -164,26 +221,183 @@ export class FloatWindowManager {
     return this.ownerWindowIdCache;
   }
 
+  async registerPipOpened(
+    hostWindowId: number,
+    sessionId: string,
+  ): Promise<RegisterPipOpenedResult> {
+    const state = await this.readLifecycleState();
+    if (!state.ok) return state;
+    if (state.hostWindowId !== hostWindowId) {
+      return { ok: false, reason: 'host-mismatch' };
+    }
+
+    if (state.pipSession !== undefined) {
+      if (
+        state.pipSession.hostWindowId === hostWindowId
+        && state.pipSession.sessionId === sessionId
+      ) {
+        return { ok: true, created: false };
+      }
+      return { ok: false, reason: 'session-conflict' };
+    }
+
+    if (sessionId.length === 0) {
+      return { ok: false, reason: 'session-conflict' };
+    }
+
+    try {
+      await this.writePipSession({ sessionId, hostWindowId, phase: 'opened' });
+      return { ok: true, created: true };
+    } catch {
+      return { ok: false, reason: 'chrome-api-failed' };
+    }
+  }
+
+  async markPipReady(
+    hostWindowId: number,
+    sessionId: string,
+  ): Promise<MarkPipReadyResult> {
+    const state = await this.readLifecycleState();
+    if (!state.ok) return state;
+    if (state.hostWindowId !== hostWindowId) {
+      return { ok: false, reason: 'host-mismatch' };
+    }
+    if (
+      state.pipSession === undefined
+      || state.pipSession.hostWindowId !== hostWindowId
+      || state.pipSession.sessionId !== sessionId
+    ) {
+      return { ok: false, reason: 'session-mismatch' };
+    }
+
+    try {
+      await this.writePipSession({ ...state.pipSession, phase: 'ready' });
+    } catch {
+      return { ok: false, reason: 'chrome-api-failed' };
+    }
+
+    try {
+      await this.chrome.windows.update(hostWindowId, { state: 'minimized' });
+      return { ok: true, minimized: true };
+    } catch {
+      return { ok: true, minimized: false };
+    }
+  }
+
+  async handlePipClosed(
+    hostWindowId: number,
+    sessionId: string,
+    _reason: 'native-close',
+  ): Promise<HandlePipClosedResult> {
+    const state = await this.readLifecycleState();
+    if (!state.ok) return state;
+    if (state.hostWindowId !== hostWindowId) {
+      return { ok: false, reason: 'host-mismatch' };
+    }
+    if (
+      state.pipSession === undefined
+      || state.pipSession.hostWindowId !== hostWindowId
+      || state.pipSession.sessionId !== sessionId
+    ) {
+      return { ok: false, reason: 'session-mismatch' };
+    }
+
+    try {
+      await this.clearPipSession();
+    } catch {
+      return { ok: false, reason: 'chrome-api-failed' };
+    }
+
+    try {
+      await this.chrome.windows.update(hostWindowId, { state: 'normal', focused: true });
+      return { ok: true, restored: true };
+    } catch {
+      return { ok: true, restored: false };
+    }
+  }
+
+  async activePipSession(): Promise<PipSessionState | undefined> {
+    try {
+      const stored = await this.storage.session.get([PIP_SESSION_STORAGE_KEY]);
+      const raw = stored[PIP_SESSION_STORAGE_KEY];
+      const session = parsePipSession(raw);
+      if (session === undefined && raw !== undefined && raw !== -1) {
+        await this.clearPipSession();
+      }
+      return session;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async recoverStoredPipSession(): Promise<RecoverStoredPipSessionResult> {
+    const state = await this.readLifecycleState();
+    if (!state.ok) return state;
+    if (state.pipSession === undefined) {
+      return { ok: true, recovered: false };
+    }
+    if (state.hostWindowId !== state.pipSession.hostWindowId) {
+      try {
+        await this.clearPipSession();
+        return { ok: false, reason: 'host-mismatch' };
+      } catch {
+        return { ok: false, reason: 'chrome-api-failed' };
+      }
+    }
+
+    try {
+      await this.chrome.windows.get(state.hostWindowId);
+    } catch {
+      try {
+        await this.clearPipSession();
+        return { ok: false, reason: 'host-missing' };
+      } catch {
+        return { ok: false, reason: 'chrome-api-failed' };
+      }
+    }
+
+    try {
+      await this.clearPipSession();
+      await this.chrome.windows.update(state.hostWindowId, {
+        state: 'normal',
+        focused: true,
+      });
+      return { ok: true, recovered: true };
+    } catch {
+      return { ok: false, reason: 'chrome-api-failed' };
+    }
+  }
+
   /** Close the tracked floating window. Missing/stale windows are already closed. */
   async close(): Promise<boolean> {
     const existingId = await this.readSessionWindowId();
-    if (existingId === undefined) return true;
+    let closed = true;
+
+    if (existingId !== undefined) {
+      try {
+        await this.chrome.windows.remove(existingId);
+      } catch {
+        try {
+          await this.chrome.windows.get(existingId);
+          closed = false;
+        } catch {
+          closed = true;
+        }
+      }
+    }
 
     try {
-      await this.chrome.windows.remove(existingId);
-      return true;
-    } catch {
-      try {
-        await this.chrome.windows.get(existingId);
-        return false;
-      } catch {
-        return true;
-      }
-    } finally {
-      await this.clearSessionWindowId();
-      await this.storage.session.set({ [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: -1 });
+      await this.storage.session.set({
+        [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+        [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: -1,
+        [PIP_SESSION_STORAGE_KEY]: -1,
+      });
       this.ownerWindowIdCache = undefined;
+    } catch {
+      return false;
     }
+
+    return closed;
   }
 
   private async openOrFocusOnce(): Promise<OpenFloatWindowResult> {
@@ -238,7 +452,14 @@ export class FloatWindowManager {
   async handleWindowRemoved(windowId: number): Promise<void> {
     const existing = await this.readSessionWindowId();
     if (existing === windowId) {
-      await this.clearSessionWindowId();
+      try {
+        await this.storage.session.set({
+          [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+          [PIP_SESSION_STORAGE_KEY]: -1,
+        });
+      } catch {
+        // Chrome may be shutting down; removal handlers must not reject.
+      }
     }
   }
 
@@ -282,5 +503,38 @@ export class FloatWindowManager {
 
   private async clearSessionWindowId(): Promise<void> {
     await this.storage.session.set({ [FLOAT_WINDOW_ID_SESSION_KEY]: -1 });
+  }
+
+  private async writePipSession(session: PipSessionState): Promise<void> {
+    await this.storage.session.set({ [PIP_SESSION_STORAGE_KEY]: session });
+  }
+
+  private async clearPipSession(): Promise<void> {
+    await this.storage.session.set({ [PIP_SESSION_STORAGE_KEY]: -1 });
+  }
+
+  private async readLifecycleState(): Promise<LifecycleStateResult> {
+    try {
+      const stored = await this.storage.session.get([
+        FLOAT_WINDOW_ID_SESSION_KEY,
+        PIP_SESSION_STORAGE_KEY,
+      ]);
+      const rawHostWindowId = stored[FLOAT_WINDOW_ID_SESSION_KEY];
+      const hostWindowId = typeof rawHostWindowId === 'number'
+        && Number.isInteger(rawHostWindowId)
+        && rawHostWindowId >= 0
+        ? rawHostWindowId
+        : undefined;
+      const rawPipSession = stored[PIP_SESSION_STORAGE_KEY];
+      const pipSession = parsePipSession(rawPipSession);
+
+      if (pipSession === undefined && rawPipSession !== undefined && rawPipSession !== -1) {
+        await this.clearPipSession();
+      }
+
+      return { ok: true, hostWindowId, pipSession };
+    } catch {
+      return { ok: false, reason: 'chrome-api-failed' };
+    }
   }
 }
