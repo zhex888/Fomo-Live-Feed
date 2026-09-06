@@ -26,6 +26,14 @@ the installation archive and checksum from the corresponding GitHub Release.
   状态的问题。
 - 修复扩展重新加载后浮窗状态残留、重复创建窗口和窗口位置越出当前屏幕的问题。
 
+### 验证
+
+- TypeScript 类型检查通过。
+- 1,363 项单元及集成测试通过。
+- 16 项 Playwright 端到端测试通过。
+- 官网 13 项契约测试通过。
+- Chrome Manifest V3 生产构建、本地安装包及 SHA-256 校验通过。
+
 ### Added
 
 - Added an optional floating-window display mode. In Settings the feed can switch
@@ -44,6 +52,14 @@ the installation archive and checksum from the corresponding GitHub Release.
   was ready, and kept connection state current in the floating window.
 - Cleared stale floating-window state after reload, prevented duplicate windows,
   and constrained restored window bounds to the active display.
+
+### Validation
+
+- TypeScript type checking.
+- 1,363 unit and integration tests.
+- 16 Playwright end-to-end tests.
+- 13 website contract tests.
+- Chrome Manifest V3 production build, local package, and SHA-256 verification.
 
 ## [0.3.0] - 2026-09-01
 
