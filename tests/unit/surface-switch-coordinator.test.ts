@@ -658,6 +658,73 @@ describe('SurfaceSwitchCoordinator', () => {
     }
   });
 
+  it('atomically lets a concurrent fresh transaction supersede an abandoned target claim', async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(ABANDONED_TARGET_KEY, {
+      switchId: 'old-abandoned-target',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+      sourceIdentity: { hostWindowId: 90, instanceToken: 'old-source' },
+      targetIdentity: { hostWindowId: 9 },
+      phase: 'target-unidentified',
+      startedAt: 900,
+    });
+    const sourceLiveness = deferred<boolean>();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+      isSourceLive: vi.fn(() => sourceLiveness.promise),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({
+      operations,
+      storage,
+      now: () => 1_000,
+    });
+    await coordinator.restore();
+
+    const bootstrap = coordinator.bootstrap('sidepanel', {
+      hostWindowId: 9,
+      instanceToken: 'late-panel',
+    });
+    await vi.waitFor(() => expect(operations.isSourceLive).toHaveBeenCalledOnce());
+    const retry = coordinator.request({
+      switchId: 'fresh-concurrent-retry',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+      sourceIdentity: { hostWindowId: 90, instanceToken: 'fresh-source' },
+      targetIdentity: { hostWindowId: 9 },
+    });
+    await vi.waitFor(() => expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      switchId: 'fresh-concurrent-retry',
+      phase: 'awaiting-ready',
+    }));
+
+    sourceLiveness.resolve(true);
+    await expect(bootstrap).resolves.toMatchObject({
+      switchId: 'fresh-concurrent-retry',
+      phase: 'awaiting-ready',
+      targetIdentity: { hostWindowId: 9, instanceToken: 'late-panel' },
+    });
+    expect(operations.closeSidePanel).not.toHaveBeenCalled();
+    expect(storage.values.get(ABANDONED_TARGET_KEY)).toBeNull();
+
+    await coordinator.ready({
+      switchId: 'fresh-concurrent-retry',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+      targetIdentity: { hostWindowId: 9, instanceToken: 'late-panel' },
+    });
+    await expect(retry).resolves.toEqual({
+      ok: true,
+      switchId: 'fresh-concurrent-retry',
+    });
+  });
+
   it('clears an abandoned target without closing it after the source generation is gone', async () => {
     const storage = new MemoryStorage();
     storage.values.set(ABANDONED_TARGET_KEY, {
