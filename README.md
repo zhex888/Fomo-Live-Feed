@@ -4,9 +4,9 @@
 
 ## 简体中文
 
-Fomo Live Feed 是一款 Chrome 扩展，通过 Chrome 右侧边栏展示当前 Fomo
-登录用户所关注交易者的实时动态。扩展会在本地保存可搜索、可筛选的历史记录，
-不会在交易页面注入额外的浮动通知卡片。
+Fomo Live Feed 是一款 Chrome 扩展，通过 Chrome 侧边栏或独立悬浮窗展示当前
+Fomo 登录用户所关注交易者的实时动态。扩展会在本地保存可搜索、可筛选的历史
+记录，不会在交易页面注入额外的浮动通知卡片。
 
 > **MVP 状态：**核心功能已经实现，并通过单元、集成及端到端测试。用于补充
 > 生产数据的 Fomo enrichment 与 REST backfill 适配器仍保持禁用，等待获取并
@@ -15,23 +15,23 @@ Fomo Live Feed 是一款 Chrome 扩展，通过 Chrome 右侧边栏展示当前 
 
 ### 下载与安装
 
-**直接下载：**[Fomo Live Feed v0.3.0（Chrome ZIP）](https://github.com/novus77/Fomo-Live-Feed/releases/download/v0.3.0/Fomo-Live-Feed-v0.3.0-chrome.zip)
+**直接下载：**[Fomo Live Feed v0.4.0（Chrome ZIP）](https://github.com/novus77/Fomo-Live-Feed/releases/download/v0.4.0/Fomo-Live-Feed-v0.4.0-chrome.zip)
 
 也可以从 GitHub 页面依次进入：**仓库首页 → Releases → Latest → Assets →
-`Fomo-Live-Feed-v0.3.0-chrome.zip`**。
+`Fomo-Live-Feed-v0.4.0-chrome.zip`**。
 
-1. 下载并解压 `Fomo-Live-Feed-v0.3.0-chrome.zip`。
+1. 下载并解压 `Fomo-Live-Feed-v0.4.0-chrome.zip`。
 2. 在 Chrome 地址栏打开 `chrome://extensions`。
 3. 开启右上角的“开发者模式”。
 4. 点击“加载已解压的扩展程序”，选择刚刚解压的目录。
 5. 保持至少一个已登录的 Fomo 页面处于打开状态；扩展重新加载后会自动恢复监听。
-6. 点击扩展图标，在 Chrome 右侧边栏查看实时信息流。
+6. 点击扩展图标打开实时信息流；可在设置中选择侧边栏或悬浮窗。
 
 接收者无需安装此仓库、Node.js 或 pnpm。解压目录中的 `START-HERE.html`
 包含启动及故障排查清单。扩展要求 **Chrome 141 或更高版本**。
 
 如需校验下载文件，可在同一 Assets 区域下载
-`Fomo-Live-Feed-v0.3.0-chrome.zip.sha256`。
+`Fomo-Live-Feed-v0.4.0-chrome.zip.sha256`。
 
 ### 主要功能
 
@@ -107,9 +107,9 @@ pnpm build      # production build -> .output/chrome-mv3
 ## English
 
 Fomo Live Feed is a Chrome extension that surfaces real-time activity from
-traders followed by the authenticated Fomo user in Chrome's Side Panel. It
-stores a searchable, filterable local history without injecting floating
-notification cards into trading pages.
+traders followed by the authenticated Fomo user in Chrome's Side Panel or a
+standalone floating window. It stores a searchable, filterable local history
+without injecting floating notification cards into trading pages.
 
 > **MVP status:** The core implementation is covered by unit, integration, and
 > end-to-end tests. The production Fomo enrichment and REST backfill adapters
@@ -120,24 +120,24 @@ notification cards into trading pages.
 
 ### Download and install
 
-**Direct download:** [Fomo Live Feed v0.3.0 for Chrome](https://github.com/novus77/Fomo-Live-Feed/releases/download/v0.3.0/Fomo-Live-Feed-v0.3.0-chrome.zip)
+**Direct download:** [Fomo Live Feed v0.4.0 for Chrome](https://github.com/novus77/Fomo-Live-Feed/releases/download/v0.4.0/Fomo-Live-Feed-v0.4.0-chrome.zip)
 
 You can also navigate through GitHub: **Repository home → Releases → Latest →
-Assets → `Fomo-Live-Feed-v0.3.0-chrome.zip`**.
+Assets → `Fomo-Live-Feed-v0.4.0-chrome.zip`**.
 
-1. Download and extract `Fomo-Live-Feed-v0.3.0-chrome.zip`.
+1. Download and extract `Fomo-Live-Feed-v0.4.0-chrome.zip`.
 2. Open `chrome://extensions` in Chrome.
 3. Enable **Developer mode** in the top-right corner.
 4. Select **Load unpacked** and choose the extracted directory.
 5. Keep at least one authenticated Fomo page open; the extension automatically restores capture after an extension reload.
-6. Select the extension icon to open the real-time feed in Chrome's Side Panel.
+6. Select the extension icon to open the feed; choose Side Panel or floating window in Settings.
 
 Recipients do not need this repository, Node.js, or pnpm. `START-HERE.html` in
 the extracted directory contains startup and troubleshooting guidance. The
 extension requires **Chrome 141 or newer**.
 
 To verify the download, get
-`Fomo-Live-Feed-v0.3.0-chrome.zip.sha256` from the same Assets section.
+`Fomo-Live-Feed-v0.4.0-chrome.zip.sha256` from the same Assets section.
 
 ### Features
 

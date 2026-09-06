@@ -9,6 +9,8 @@ the installation archive and checksum from the corresponding GitHub Release.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-06
+
 ### 新增与优化
 
 - 新增可选的悬浮窗显示模式。设置中可将信息流从 Chrome 侧边栏切换为**全局唯一**
@@ -17,6 +19,12 @@ the installation archive and checksum from the corresponding GitHub Release.
   备注和未读状态，互为软互斥，仍可从浏览器 UI 手动打开侧边栏。
 - 悬浮窗复用与侧边栏完全相同的紧凑信息流、筛选、设置和支持界面，隐私边界不变
   （仍零页面注入，不申请新权限）。
+
+### 修复
+
+- 修复切换显示模式时目标界面可能未创建、原界面提前关闭，以及悬浮窗显示旧连接
+  状态的问题。
+- 修复扩展重新加载后浮窗状态残留、重复创建窗口和窗口位置越出当前屏幕的问题。
 
 ### Added
 
@@ -29,6 +37,13 @@ the installation archive and checksum from the corresponding GitHub Release.
 - The floating window reuses the exact same compact feed, filters, settings, and
   support UI as the side panel, with an unchanged privacy boundary (still zero page
   injection, no new permissions).
+
+### Fixed
+
+- Prevented display-mode switches from closing the source before the destination
+  was ready, and kept connection state current in the floating window.
+- Cleared stale floating-window state after reload, prevented duplicate windows,
+  and constrained restored window bounds to the active display.
 
 ## [0.3.0] - 2026-09-01
 

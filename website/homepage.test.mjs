@@ -32,9 +32,9 @@ test('fills the primary feature card with four representative activity rows', ()
 
 test('links to the public GitHub repository from navigation and footer', () => {
   const repositoryUrl = 'https://github.com/novus77/Fomo-Live-Feed';
-  // Three source links (header nav, mobile button, footer) plus three
+  // Three source links (header nav, mobile button, footer) plus four
   // per-version release links inside the updates section.
-  assert.equal(html.split(repositoryUrl).length - 1, 6);
+  assert.equal(html.split(repositoryUrl).length - 1, 7);
   assert.match(html, /class="mobile-github"/);
 });
 
@@ -69,6 +69,13 @@ test('downloads the current v0.4.0 Chrome package', () => {
     script,
     /releases\/download\/v0\.4\.0\/Fomo-Live-Feed-v0\.4\.0-chrome\.zip/,
   );
+});
+
+test('explains the v0.4.0 display-mode behavior', () => {
+  assert.match(html, /releases\/tag\/v0\.4\.0/);
+  assert.match(html, /侧边栏和悬浮窗/);
+  assert.match(html, /全局唯一/);
+  assert.match(html, /数据.*同步/);
 });
 
 test('the product demo exposes four accessible tabs', () => {
