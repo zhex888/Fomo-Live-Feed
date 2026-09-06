@@ -38,6 +38,7 @@ import {
   type PipelineHealthQueryResponse,
   type SyncQueryResponse,
 } from '../src/messaging/protocol';
+import { SurfaceSwitchCoordinator } from '../src/background/surface-switch-coordinator';
 import { FomoFeedDatabase } from '../src/storage/database';
 import {
   EventRepository,
@@ -50,7 +51,10 @@ import {
 } from '../src/storage/local-preferences';
 import {
   applyDisplayModeToAction,
+  closeSidePanelForWindow,
   configureActionSidePanel,
+  openSidePanelForWindow,
+  type ChromeWithOptionalSidePanel,
 } from '../src/sidepanel/sidepanel-api';
 import { MetricRepository } from '../src/storage/metric-repository';
 import { createLiveBuyNotifier } from '../src/background/buy-sound';
@@ -218,6 +222,21 @@ export default defineBackground(() => {
    * float window.
    */
   let currentDisplayMode: 'sidepanel' | 'floating' = 'sidepanel';
+  const sidePanelChrome = browser as unknown as ChromeWithOptionalSidePanel;
+  const surfaceSwitchCoordinator = new SurfaceSwitchCoordinator({
+    operations: {
+      openFloating: async () => (await floatWindowManager.openOrFocus()).ok,
+      openSidePanel: (windowId) => openSidePanelForWindow(windowId, sidePanelChrome),
+      closeFloating: () => floatWindowManager.close(),
+      closeSidePanel: (windowId) => closeSidePanelForWindow(windowId, sidePanelChrome),
+      saveDisplayMode: async (mode) => {
+        await preferences.updateSettings({ displayMode: mode });
+        currentDisplayMode = mode;
+        await applyDisplayModeToAction(mode, sidePanelChrome);
+      },
+    },
+    storage: sessionStorage,
+  });
 
   // When the side panel behavior is OFF (floating mode), Chrome fires
   // action.onClicked instead of opening the panel. The listener must ALWAYS
@@ -757,6 +776,27 @@ export default defineBackground(() => {
             .saveGeometry(message.payload as FloatWindowGeometry)
             .then(() => ({ ok: true as const }))
             .catch(() => ({ ok: false as const }));
+        case 'surface.switch.request':
+          return surfaceSwitchCoordinator.request(message.payload).then((result) => {
+            const changed: ExtensionMessage = {
+              protocolVersion: 1,
+              type: 'surface.switch.changed',
+              payload: result,
+            };
+            void browser.runtime.sendMessage(changed).catch(() => {});
+            return result;
+          });
+        case 'surface.bootstrap':
+          return surfaceSwitchCoordinator.bootstrap(message.payload.surface).then(
+            (transaction) => ({
+              ok: true as const,
+              ...(transaction === undefined ? {} : { transaction }),
+            }),
+          );
+        case 'surface.ready':
+          return surfaceSwitchCoordinator.ready(message.payload);
+        case 'surface.switch.changed':
+          return undefined;
         case 'sync.request':
           // Task 5 Step 5: the side panel/popup asks for a bounded backfill.
           // Single-flight makes a request racing a reconnect backfill a no-op.

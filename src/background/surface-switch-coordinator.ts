@@ -156,10 +156,13 @@ export class SurfaceSwitchCoordinator {
 
   private async openTarget(transaction: SwitchTransaction): Promise<void> {
     try {
+      // Invoke the Chrome surface API before the first await so a side-panel
+      // open remains inside the originating user-activation task.
+      const openPromise = transaction.target === 'floating'
+        ? this.options.operations.openFloating()
+        : this.options.operations.openSidePanel(transaction.sourceWindowId);
       await this.persist(transaction);
-      const opened = transaction.target === 'floating'
-        ? await this.options.operations.openFloating()
-        : await this.options.operations.openSidePanel(transaction.sourceWindowId);
+      const opened = await openPromise;
       if (!opened) {
         await this.finish({
           ok: false,

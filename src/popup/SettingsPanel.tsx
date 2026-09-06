@@ -18,6 +18,8 @@ export interface SettingsPanelProps {
   ): void;
   /** Display-mode (side panel vs single floating window) changes. */
   onDisplayModeChange?(mode: DisplayMode): void;
+  displayModeSwitching?: boolean;
+  displayModeSwitchError?: boolean;
 }
 
 /**
@@ -35,6 +37,8 @@ export function SettingsPanel(props: SettingsPanelProps) {
     onNotificationsChange,
     onFinancialDisplayChange,
     onDisplayModeChange,
+    displayModeSwitching = false,
+    displayModeSwitchError = false,
   } = props;
   const { locale, setLocale, translate } = useLocale();
 
@@ -107,21 +111,27 @@ export function SettingsPanel(props: SettingsPanelProps) {
               type="button"
               className="display-mode-switcher-button"
               aria-pressed={settings.displayMode === 'sidepanel'}
+              disabled={displayModeSwitching}
               onClick={() => {
                 onDisplayModeChange('sidepanel');
               }}
             >
-              {translate('settings.displayModeSidePanel')}
+              {displayModeSwitching && settings.displayMode !== 'sidepanel'
+                ? translate('settings.displayModeSwitching')
+                : translate('settings.displayModeSidePanel')}
             </button>
             <button
               type="button"
               className="display-mode-switcher-button"
               aria-pressed={settings.displayMode === 'floating'}
+              disabled={displayModeSwitching}
               onClick={() => {
                 onDisplayModeChange('floating');
               }}
             >
-              {translate('settings.displayModeFloating')}
+              {displayModeSwitching && settings.displayMode !== 'floating'
+                ? translate('settings.displayModeSwitching')
+                : translate('settings.displayModeFloating')}
             </button>
           </div>
           <p className="settings-description">
@@ -129,6 +139,11 @@ export function SettingsPanel(props: SettingsPanelProps) {
               ? translate('settings.displayModeFloatingHint')
               : translate('settings.displayModeSidePanelHint')}
           </p>
+          {displayModeSwitchError && (
+            <p className="settings-description" role="alert">
+              {translate('settings.displayModeSwitchError')}
+            </p>
+          )}
         </section>
       )}
 

@@ -16,6 +16,7 @@ import {
 } from '../domain/settings';
 import { useLocale } from '../i18n/LocaleProvider';
 import { parseExtensionMessage } from '../messaging/protocol';
+import type { SurfaceKey } from '../messaging/protocol';
 import { createContentTranslationClient } from '../translation/content-translation-client';
 import { createLocalFirstTranslationApi } from '../translation/google-translation';
 import { OpinionTranslationCoordinator } from '../translation/opinion-translation';
@@ -53,6 +54,7 @@ import { SettingsPanel } from '../popup/SettingsPanel';
 import { useEventFeed } from '../popup/use-event-feed';
 import { PipelineDiagnostics } from './PipelineDiagnostics';
 import { SupportPanel } from './SupportPanel';
+import { createSurfaceSwitchClient } from './surface-switch-client';
 import {
   FILTERABLE_CHAINS,
   toMutedChains,
@@ -130,6 +132,7 @@ export interface SidePanelDependencies {
   now: () => number;
   openLink?: (url: URL) => void;
   copyText?: (text: string) => Promise<void>;
+  getCurrentWindowId?: () => Promise<number>;
   /**
    * `popup` keeps the search/filter toolbar and pinned-first toggle that the
    * deprecated popup wrapper still needs; `sidepanel` (default) renders a
@@ -151,6 +154,7 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
   const now = deps.now;
   const variant = deps.variant ?? 'sidepanel';
   const surface = deps.surface ?? 'sidepanel';
+  const surfaceKey: SurfaceKey = surface === 'floatpanel' ? 'floating' : 'sidepanel';
   const showFeedControls = variant === 'popup';
   const { translate } = useLocale();
 
@@ -161,6 +165,13 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
     () => deps.preferences ?? new LocalPreferences(deps.storage.local),
     [deps.preferences, deps.storage.local],
   );
+  const surfaceSwitchClient = useMemo(
+    () => createSurfaceSwitchClient(runtime),
+    [runtime],
+  );
+  const [surfaceSwitchState, setSurfaceSwitchState] = useState<
+    'idle' | 'switching' | 'error'
+  >('idle');
 
   const [translationRetryToken, setTranslationRetryToken] = useState(0);
   const [translationHostEpoch, setTranslationHostEpoch] = useState(0);
@@ -582,6 +593,45 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
     },
   );
 
+  // The coordinator opens a new target surface. It acknowledges the active
+  // transaction only after the initial history snapshot and live listener
+  // are ready; the source remains visible until this completes.
+  useEffect(() => {
+    if (feed.status !== 'ready') return;
+
+    let disposed = false;
+    let readySwitchId: string | undefined;
+    const check = async (): Promise<void> => {
+      try {
+        const windowId = await (deps.getCurrentWindowId?.() ?? Promise.resolve(0));
+        const bootstrap = await surfaceSwitchClient.bootstrap(surfaceKey, windowId);
+        const transaction = bootstrap.transaction;
+        if (
+          disposed
+          || transaction === undefined
+          || transaction.switchId === readySwitchId
+        ) return;
+        readySwitchId = transaction.switchId;
+        const eventWatermark = feed.events.reduce(
+          (latest, event) => Math.max(latest, event.occurredAt),
+          0,
+        );
+        await surfaceSwitchClient.ready(
+          transaction.switchId,
+          surfaceKey,
+          eventWatermark,
+        );
+      } catch {
+        // The next bounded poll retries while this surface remains mounted.
+      }
+    };
+
+    void check();
+    return () => {
+      disposed = true;
+    };
+  }, [deps.getCurrentWindowId, feed.events, feed.status, surfaceKey, surfaceSwitchClient]);
+
   const upsertAnnotation = useCallback(
     (traderId: string, update: TraderAnnotationUpdate): void => {
       void preferences
@@ -668,15 +718,16 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
 
   const updateDisplayMode = useCallback(
     (displayMode: DisplayMode): void => {
-      void preferences
-        .updateSettings({ displayMode })
-        .then((next) => {
-          setSettings(next);
-          notifyPreferencesChanged(runtime);
+      if (displayMode === surfaceKey || surfaceSwitchState === 'switching') return;
+      setSurfaceSwitchState('switching');
+      void (deps.getCurrentWindowId?.() ?? Promise.resolve(0))
+        .then((windowId) => surfaceSwitchClient.switchTo(surfaceKey, displayMode, windowId))
+        .then((result) => {
+          if (!result.ok) setSurfaceSwitchState('error');
         })
-        .catch(() => {});
+        .catch(() => setSurfaceSwitchState('error'));
     },
-    [preferences, runtime],
+    [deps.getCurrentWindowId, surfaceKey, surfaceSwitchClient, surfaceSwitchState],
   );
 
   const handleFiltersChange = useCallback((nextFilters: PopupEventFilters): void => {
@@ -858,6 +909,8 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
             onNotificationsChange={updateNotifications}
             onFinancialDisplayChange={updateFinancialDisplay}
             onDisplayModeChange={updateDisplayMode}
+            displayModeSwitching={surfaceSwitchState === 'switching'}
+            displayModeSwitchError={surfaceSwitchState === 'error'}
           />
           {pipelineHealth !== undefined && (
             <PipelineDiagnostics health={pipelineHealth} now={() => diagnosticsNow} />

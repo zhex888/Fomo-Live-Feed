@@ -70,6 +70,7 @@ function createHarness(connection: ConnectionQueryResponse) {
   const storageRecords: Record<string, unknown> = {};
   let storageSetFailure = false;
   let events: TradeEventV1[] = [];
+  let surfaceSwitchResult: unknown = { ok: true, switchId: 'switch-result' };
 
   const deps: SidePanelDependencies = {
     runtime: {
@@ -114,6 +115,8 @@ function createHarness(connection: ConnectionQueryResponse) {
           };
           return { ok: true };
         }
+        if (type === 'surface.bootstrap') return { ok: true };
+        if (type === 'surface.switch.request') return surfaceSwitchResult;
         return { ok: true };
       },
       onMessage: {
@@ -175,6 +178,9 @@ function createHarness(connection: ConnectionQueryResponse) {
     setEvents(next: TradeEventV1[]) {
       events = next;
     },
+    setSurfaceSwitchResult(next: unknown) {
+      surfaceSwitchResult = next;
+    },
     emit(message: unknown) {
       listeners.forEach((listener) => listener(message));
     },
@@ -198,6 +204,43 @@ afterEach(() => {
 });
 
 describe('SidePanelApp', () => {
+  it('requests an atomic switch to the other surface from settings', async () => {
+    const harness = createHarness({
+      ok: true, connected: true, authenticated: true, hasFomoTab: true,
+    });
+    harness.deps.getCurrentWindowId = async () => 17;
+    render(<SidePanelApp deps={harness.deps} />);
+    await waitFor(() => expect(connectionStatus()).toHaveTextContent('Connected'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Floating window' }));
+
+    await waitFor(() => expect(harness.sentMessages()).toContainEqual(expect.objectContaining({
+      type: 'surface.switch.request',
+      payload: expect.objectContaining({
+        source: 'sidepanel',
+        target: 'floating',
+        sourceWindowId: 17,
+      }),
+    })));
+  });
+
+  it('keeps the source usable and shows an error when switching fails', async () => {
+    const harness = createHarness({
+      ok: true, connected: true, authenticated: true, hasFomoTab: true,
+    });
+    harness.setSurfaceSwitchResult({
+      ok: false, switchId: 'failed', reason: 'target-open-failed',
+    });
+    render(<SidePanelApp deps={harness.deps} />);
+    await waitFor(() => expect(connectionStatus()).toHaveTextContent('Connected'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Floating window' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not switch view. Try again.');
+    expect(connectionStatus()).toHaveTextContent('Connected');
+  });
   it('exposes independent financial styles as scoped root variables', async () => {
     const harness = createHarness({
       ok: true,

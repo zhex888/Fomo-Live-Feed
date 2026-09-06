@@ -184,6 +184,8 @@ export const EN_MESSAGES = {
     'Click the extension icon to open the feed in Chrome’s side panel.',
   'settings.displayModeFloatingHint':
     'Click the extension icon to open one shared floating window. Resize it freely; the size is remembered.',
+  'settings.displayModeSwitching': 'Switching…',
+  'settings.displayModeSwitchError': 'Could not switch view. Try again.',
   'settings.translation': 'Translation',
   'settings.translationTarget': 'Target language',
   'settings.translationTargetAuto': 'Auto',
@@ -437,6 +439,8 @@ export const ZH_MESSAGES: Record<MessageKey, string> = {
   'settings.displayModeSidePanelHint': '点击扩展图标，在 Chrome 侧边栏中查看信息流。',
   'settings.displayModeFloatingHint':
     '点击扩展图标，打开唯一的全局悬浮窗。可自由调整大小，尺寸会被记住。',
+  'settings.displayModeSwitching': '正在切换…',
+  'settings.displayModeSwitchError': '无法切换显示方式，请重试。',
   'settings.translation': '翻译',
   'settings.translationTarget': '目标语言',
   'settings.translationTargetAuto': '自动',

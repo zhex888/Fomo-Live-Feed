@@ -47,6 +47,8 @@ export function App() {
         window.open(url.href, '_blank', 'noopener,noreferrer');
       },
       copyText: (text: string) => navigator.clipboard.writeText(text),
+      getCurrentWindowId: async () => (await browser.windows.getCurrent()).id ?? 0,
+      surface: 'sidepanel',
     };
   }, []);
 

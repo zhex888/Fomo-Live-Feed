@@ -32,7 +32,7 @@ export async function closeSidePanelForWindow(
   }
 }
 
-interface ChromeWithOptionalSidePanel {
+export interface ChromeWithOptionalSidePanel {
   sidePanel?: SidePanelApiLike;
   action?: { onClicked?: { addListener(listener: () => void): void } };
   runtime?: { getURL(path: string): string };
