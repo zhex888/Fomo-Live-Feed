@@ -27,6 +27,7 @@ import { unavailableHistoryClient } from '../src/fomo/history-client';
 import { NETWORK_CATALOG } from '../src/fomo/network-map';
 import {
   FOMO_ORIGINS,
+  isTrustedFloatHostSender,
   isTrustedSenderForMessage,
   type MessageSenderLike,
 } from '../src/messaging/guards';
@@ -118,13 +119,23 @@ interface MarkReadResponse {
 interface SenderForGuard {
   id?: string | undefined;
   url?: string | undefined;
-  tab?: { url?: string | undefined; id?: number | undefined };
+  tab?: {
+    url?: string | undefined;
+    id?: number | undefined;
+    windowId?: number | undefined;
+  };
 }
 
 const toSenderLike = (sender: SenderForGuard): MessageSenderLike => ({
   ...(sender.id !== undefined ? { id: sender.id } : {}),
   ...(sender.url !== undefined ? { url: sender.url } : {}),
-  ...(sender.tab?.url !== undefined ? { tab: { url: sender.tab.url } } : {}),
+  ...(sender.tab === undefined ? {} : {
+    tab: {
+      ...(sender.tab.url === undefined ? {} : { url: sender.tab.url }),
+      ...(sender.tab.id === undefined ? {} : { id: sender.tab.id }),
+      ...(sender.tab.windowId === undefined ? {} : { windowId: sender.tab.windowId }),
+    },
+  }),
 });
 
 export default defineBackground(() => {
@@ -639,9 +650,9 @@ export default defineBackground(() => {
   });
 
   const bootstrap = async (): Promise<void> => {
-    // A persisted PiP token cannot prove that its document survived a worker
-    // restart. Normalize the tracked host and clear that unconfirmed token;
-    // a live PiP will establish a fresh synchronous cache via pip.opened.
+    // Validate the tracked host and hydrate owner/PiP caches before accepting
+    // messages. A surviving PiP can then return synchronously without losing
+    // Chrome's user activation; the next lifecycle message confirms it live.
     await floatWindowManager.recoverStoredPipSession();
 
     // Seed the display mode before wiring the action behavior so the action
@@ -730,6 +741,23 @@ export default defineBackground(() => {
 
       if (!isTrustedSenderForMessage(toSenderLike(sender), message.type, browser.runtime.id)) {
         return undefined;
+      }
+
+      switch (message.type) {
+        case 'pip.opened':
+        case 'pip.ready':
+        case 'pip.closed':
+        case 'pip.returnToSidePanel':
+          if (!isTrustedFloatHostSender(
+            toSenderLike(sender),
+            browser.runtime.id,
+            message.payload.hostWindowId,
+          )) {
+            return undefined;
+          }
+          break;
+        default:
+          break;
       }
 
       if (sender.tab?.id !== undefined) {

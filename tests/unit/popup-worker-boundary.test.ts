@@ -6,6 +6,7 @@ import type { TradeEventV1 } from '../../src/domain/activity';
 import { DiagnosticRecorder } from '../../src/background/diagnostics';
 import {
   FLOAT_GEOMETRY_STORAGE_KEY,
+  FLOAT_OWNER_WINDOW_ID_SESSION_KEY,
   FLOAT_WINDOW_ID_SESSION_KEY,
   PIP_SESSION_STORAGE_KEY,
   FloatWindowManager,
@@ -108,7 +109,11 @@ interface FakeBrowser {
     getLastFocused(): Promise<{ id?: number }>;
     update(
       windowId: number,
-      update: { focused: true } | { state: 'minimized' } | { state: 'normal'; focused: true },
+      update:
+        | { focused: true }
+        | { state: 'minimized' }
+        | { state: 'normal' }
+        | { state: 'normal'; focused: true },
     ): Promise<unknown>;
     get(windowId: number): Promise<{ id?: number }>;
     create(create: unknown): Promise<{ id?: number }>;
@@ -144,6 +149,7 @@ function createFakeBrowser(options: {
   initialSession?: Record<string, unknown>;
   initialFloatWindowId?: number;
   onSidePanelOpen?: (windowId: number) => void;
+  rejectSidePanelOpen?: boolean;
 } = {}) {
   const localRecords: Record<string, unknown> = {};
   const sessionRecords: Record<string, unknown> = { ...options.initialSession };
@@ -169,6 +175,7 @@ function createFakeBrowser(options: {
       async open({ windowId }): Promise<void> {
         sidePanelOpenCalls.push(windowId);
         options.onSidePanelOpen?.(windowId);
+        if (options.rejectSidePanelOpen) throw new Error('side panel open failed');
       },
       async close(): Promise<void> {},
     },
@@ -338,6 +345,14 @@ const FOMO_TAB_SENDER: { id: string; tab: { url: string; id: number } } = {
   id: EXTENSION_ID,
   tab: { url: 'https://fomo.family/', id: 0 },
 };
+const floatHostSender = (windowId: number): MessageSenderLike => {
+  const url = `chrome-extension://${EXTENSION_ID}/floatpanel.html?surface=floating#pip`;
+  return {
+    id: EXTENSION_ID,
+    url,
+    tab: { id: 90, windowId, url },
+  };
+};
 
 /** The popup's runtime adapter: sendMessage dispatches into the worker. */
 function createPopupRuntime(fake: ReturnType<typeof createFakeBrowser>): {
@@ -373,6 +388,7 @@ async function startWorker(
     initialSession?: Record<string, unknown>;
     initialFloatWindowId?: number;
     onSidePanelOpen?: (windowId: number) => void;
+    rejectSidePanelOpen?: boolean;
   } = {},
 ) {
   const fake = createFakeBrowser(options);
@@ -422,7 +438,7 @@ describe('worker boundary: real popup clients against the real listener', () => 
     ) as { ok: true; windowId: number };
     const lifecycle = (type: string, payload: Record<string, unknown>) => fake.dispatch(
       { protocolVersion: 1, type, payload },
-      POPUP_SENDER,
+      floatHostSender(Number(payload.hostWindowId)),
     );
 
     await expect(lifecycle('pip.opened', {
@@ -466,19 +482,33 @@ describe('worker boundary: real popup clients against the real listener', () => 
       type: 'pip.opened',
       payload: { sessionId: 'pip-live', hostWindowId: host.windowId },
     };
-    await fake.dispatch(opened, POPUP_SENDER);
+    await fake.dispatch(opened, floatHostSender(host.windowId));
     const before = structuredClone(fake.sessionRecords[PIP_SESSION_STORAGE_KEY]);
 
     await expect(fake.dispatch({
       protocolVersion: 1,
       type: 'pip.ready',
       payload: { sessionId: 'pip-live', hostWindowId: host.windowId + 1, eventWatermark: 0 },
-    }, POPUP_SENDER)).resolves.toEqual({ ok: false, reason: 'host-mismatch' });
+    }, floatHostSender(host.windowId + 1))).resolves.toEqual({
+      ok: false,
+      reason: 'host-mismatch',
+    });
     await expect(fake.dispatch({
       protocolVersion: 1,
       type: 'pip.closed',
       payload: { sessionId: 'pip-old', hostWindowId: host.windowId, reason: 'native-close' },
-    }, POPUP_SENDER)).resolves.toEqual({ ok: false, reason: 'session-mismatch' });
+    }, floatHostSender(host.windowId))).resolves.toEqual({
+      ok: false,
+      reason: 'session-mismatch',
+    });
+    await expect(fake.dispatch(opened, POPUP_SENDER)).resolves.toBeUndefined();
+    await expect(fake.dispatch(opened, {
+      ...floatHostSender(host.windowId + 1),
+      tab: {
+        ...floatHostSender(host.windowId + 1).tab,
+        windowId: host.windowId + 1,
+      },
+    })).resolves.toBeUndefined();
     await expect(fake.dispatch(opened, FOMO_TAB_SENDER)).resolves.toBeUndefined();
     await expect(fake.dispatch(opened, {
       id: EXTENSION_ID,
@@ -503,7 +533,7 @@ describe('worker boundary: real popup clients against the real listener', () => 
       protocolVersion: 1,
       type: 'pip.opened',
       payload: { sessionId: 'pip-live', hostWindowId: host.windowId },
-    }, POPUP_SENDER);
+    }, floatHostSender(host.windowId));
 
     queueMicrotask(() => { crossedMicrotask = true; });
     const returned = fake.dispatch({
@@ -512,7 +542,7 @@ describe('worker boundary: real popup clients against the real listener', () => 
       payload: {
         sessionId: 'pip-live', hostWindowId: host.windowId, switchId: 'switch-return',
       },
-    }, POPUP_SENDER);
+    }, floatHostSender(host.windowId));
 
     expect(observedAtOpen).toEqual([false]);
     await vi.waitFor(() => expect(fake.healthChanges).toContainEqual({
@@ -542,7 +572,7 @@ describe('worker boundary: real popup clients against the real listener', () => 
       payload: {
         sessionId: 'pip-live', hostWindowId: host.windowId, reason: 'return-to-sidepanel',
       },
-    }, POPUP_SENDER)).resolves.toMatchObject({ ok: false });
+    }, floatHostSender(host.windowId))).resolves.toMatchObject({ ok: false });
     expect(fake.navigationCalls.filter((call) => (
       (call as { update?: unknown }).update as { state?: string } | undefined
     )?.state === 'normal')).toHaveLength(restoreCount);
@@ -558,24 +588,25 @@ describe('worker boundary: real popup clients against the real listener', () => 
       protocolVersion: 1,
       type: 'pip.opened',
       payload: { sessionId: 'pip-live', hostWindowId: host.windowId },
-    }, POPUP_SENDER);
+    }, floatHostSender(host.windowId));
 
     await expect(fake.dispatch({
       protocolVersion: 1,
       type: 'pip.returnToSidePanel',
       payload: { sessionId: 'pip-old', hostWindowId: host.windowId, switchId: 'switch-old' },
-    }, POPUP_SENDER)).resolves.toEqual({
+    }, floatHostSender(host.windowId))).resolves.toEqual({
       ok: false, switchId: 'switch-old', reason: 'stale-switch',
     });
     expect(fake.sidePanelOpenCalls).toEqual([]);
   });
 
-  it('invokes stored PiP recovery during worker bootstrap', async () => {
+  it('hydrates a stored live PiP session during worker bootstrap without focusing it', async () => {
     const recover = vi.spyOn(FloatWindowManager.prototype, 'recoverStoredPipSession');
     const fake = await startWorker({
       initialFloatWindowId: 900,
       initialSession: {
         [FLOAT_WINDOW_ID_SESSION_KEY]: 900,
+        [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
         [PIP_SESSION_STORAGE_KEY]: {
           sessionId: 'unconfirmed-after-restart',
           hostWindowId: 900,
@@ -585,10 +616,125 @@ describe('worker boundary: real popup clients against the real listener', () => 
     });
 
     expect(recover).toHaveBeenCalledOnce();
-    expect(fake.sessionRecords[PIP_SESSION_STORAGE_KEY]).toBe(-1);
-    expect(fake.navigationCalls).toContainEqual({
+    expect(fake.sessionRecords[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'unconfirmed-after-restart',
+    });
+    expect(fake.navigationCalls).toEqual([]);
+  });
+
+  it('returns a live PiP to its original owner after the worker restarts', async () => {
+    let crossedMicrotask = false;
+    const observedAtOpen: Array<{ windowId: number; crossedMicrotask: boolean }> = [];
+    const fake = await startWorker({
+      onSidePanelOpen: (windowId) => observedAtOpen.push({ windowId, crossedMicrotask }),
+    });
+    const toFloating = fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.switch.request',
+      payload: {
+        switchId: 'switch-to-floating',
+        source: 'sidepanel',
+        target: 'floating',
+        sourceWindowId: 77,
+      },
+    }, POPUP_SENDER);
+    await vi.waitFor(() => expect(fake.healthChanges).toContainEqual({
+      protocolVersion: 1,
+      type: 'surface.switch.started',
+      payload: { switchId: 'switch-to-floating', target: 'floating' },
+    }));
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.ready',
+      payload: { switchId: 'switch-to-floating', surface: 'floating', eventWatermark: 1 },
+    }, POPUP_SENDER);
+    await toFloating;
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.opened',
+      payload: { sessionId: 'pip-survived', hostWindowId: 900 },
+    }, floatHostSender(900));
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.ready',
+      payload: { sessionId: 'pip-survived', hostWindowId: 900, eventWatermark: 1 },
+    }, floatHostSender(900));
+
+    fake.navigationCalls.splice(0);
+    workerSetup?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    queueMicrotask(() => { crossedMicrotask = true; });
+    const returned = fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.returnToSidePanel',
+      payload: {
+        sessionId: 'pip-survived',
+        hostWindowId: 900,
+        switchId: 'switch-after-restart',
+      },
+    }, floatHostSender(900));
+
+    expect(observedAtOpen).toEqual([{ windowId: 77, crossedMicrotask: false }]);
+    expect(fake.navigationCalls).toEqual([]);
+    await vi.waitFor(() => expect(fake.healthChanges).toContainEqual({
+      protocolVersion: 1,
+      type: 'surface.switch.started',
+      payload: { switchId: 'switch-after-restart', target: 'sidepanel' },
+    }));
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.ready',
+      payload: { switchId: 'switch-after-restart', surface: 'sidepanel', eventWatermark: 2 },
+    }, POPUP_SENDER);
+    await expect(returned).resolves.toEqual({ ok: true, switchId: 'switch-after-restart' });
+  });
+
+  it('restores a matching PiP close when return-to-sidepanel opening fails', async () => {
+    const fake = await startWorker({ rejectSidePanelOpen: true });
+    const host = await fake.dispatch(
+      { protocolVersion: 1, type: 'float.open' },
+      POPUP_SENDER,
+    ) as { ok: true; windowId: number };
+    const sender = floatHostSender(host.windowId);
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.opened',
+      payload: { sessionId: 'pip-return-failed', hostWindowId: host.windowId },
+    }, sender);
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.ready',
+      payload: {
+        sessionId: 'pip-return-failed', hostWindowId: host.windowId, eventWatermark: 1,
+      },
+    }, sender);
+
+    await expect(fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.returnToSidePanel',
+      payload: {
+        sessionId: 'pip-return-failed',
+        hostWindowId: host.windowId,
+        switchId: 'switch-failed',
+      },
+    }, sender)).resolves.toEqual({
+      ok: false,
+      switchId: 'switch-failed',
+      reason: 'target-open-failed',
+    });
+    await expect(fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.closed',
+      payload: {
+        sessionId: 'pip-return-failed',
+        hostWindowId: host.windowId,
+        reason: 'return-to-sidepanel',
+      },
+    }, sender)).resolves.toEqual({ ok: true, restored: true });
+    expect(fake.navigationCalls.at(-1)).toEqual({
       action: 'focus',
-      windowId: 900,
+      windowId: host.windowId,
       update: { state: 'normal', focused: true },
     });
   });

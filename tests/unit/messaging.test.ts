@@ -14,6 +14,7 @@ import type { ProtocolRejectionCode } from '../../src/messaging/protocol';
 import {
   FOMO_ORIGINS,
   isAllowedFomoOrigin,
+  isTrustedFloatHostSender,
   isTrustedFomoSender,
   isTrustedFomoWindowMessage,
   isTrustedPopupSender,
@@ -1081,6 +1082,49 @@ describe('guards', () => {
       [''],
     ])('rejects a present sender url that is not our chrome-extension page: %s', (url) => {
       expect(isTrustedPopupSender({ id: EXTENSION_ID, url }, EXTENSION_ID)).toBe(false);
+    });
+  });
+
+  describe('isTrustedFloatHostSender', () => {
+    const EXTENSION_ID = 'our-extension-id';
+    const FLOAT_URL = `chrome-extension://${EXTENSION_ID}/floatpanel.html?mode=pip#feed`;
+
+    it('binds an exact float page sender to the Chrome host window id', () => {
+      expect(isTrustedFloatHostSender({
+        id: EXTENSION_ID,
+        url: FLOAT_URL,
+        tab: { id: 12, windowId: 900, url: FLOAT_URL },
+      }, EXTENSION_ID, 900)).toBe(true);
+    });
+
+    it.each([
+      ['tabless popup', { id: EXTENSION_ID }],
+      ['side panel', {
+        id: EXTENSION_ID,
+        url: `chrome-extension://${EXTENSION_ID}/sidepanel.html`,
+        tab: {
+          id: 12,
+          windowId: 900,
+          url: `chrome-extension://${EXTENSION_ID}/sidepanel.html`,
+        },
+      }],
+      ['wrong window', {
+        id: EXTENSION_ID,
+        url: FLOAT_URL,
+        tab: { id: 900, windowId: 901, url: FLOAT_URL },
+      }],
+      ['tab id confusion', {
+        id: EXTENSION_ID,
+        url: FLOAT_URL,
+        tab: { id: 900, windowId: 12, url: FLOAT_URL },
+      }],
+      ['other extension', {
+        id: 'other-extension',
+        url: FLOAT_URL,
+        tab: { id: 12, windowId: 900, url: FLOAT_URL },
+      }],
+    ])('rejects %s', (_label, sender) => {
+      expect(isTrustedFloatHostSender(sender, EXTENSION_ID, 900)).toBe(false);
     });
   });
 

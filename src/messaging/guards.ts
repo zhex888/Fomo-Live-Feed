@@ -22,6 +22,8 @@ export interface MessageSenderLike {
   id?: string;
   url?: string;
   tab?: {
+    id?: number;
+    windowId?: number;
     url?: string;
   };
 }
@@ -131,6 +133,35 @@ export function isTrustedPopupSender(
 
   if (!isOwnExtensionUrl(sender.url)) return false;
   return sender.tab === undefined || isOwnExtensionUrl(sender.tab.url);
+}
+
+/** Bind PiP lifecycle messages to the tracked floatpanel Chrome window. */
+export function isTrustedFloatHostSender(
+  sender: MessageSenderLike | null | undefined,
+  expectedExtensionId: string,
+  hostWindowId: number,
+): boolean {
+  if (
+    sender?.id !== expectedExtensionId
+    || sender.tab?.windowId !== hostWindowId
+  ) {
+    return false;
+  }
+
+  const isExactFloatPanelUrl = (value: unknown): boolean => {
+    if (typeof value !== 'string') return false;
+    try {
+      const url = new URL(value);
+      return url.protocol === 'chrome-extension:'
+        && url.host === expectedExtensionId
+        && url.pathname === '/floatpanel.html';
+    } catch {
+      return false;
+    }
+  };
+
+  return isExactFloatPanelUrl(sender.url)
+    && isExactFloatPanelUrl(sender.tab.url);
 }
 
 /**
