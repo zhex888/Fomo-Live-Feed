@@ -819,6 +819,73 @@ describe('SurfaceSwitchCoordinator', () => {
     expect(storage.values.get(ABANDONED_TARGET_KEY)).toBeNull();
   });
 
+  it('lets only the latest claimed generation bind a fresh transaction after superseding cleanup', async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(ABANDONED_TARGET_KEY, {
+      switchId: 'superseded-generation-target',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+      sourceIdentity: { hostWindowId: 90, instanceToken: 'old-source' },
+      targetIdentity: { hostWindowId: 9 },
+      phase: 'target-unidentified',
+      startedAt: 900,
+    });
+    const sourceLiveness = deferred<boolean>();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+      isSourceLive: vi.fn(() => sourceLiveness.promise),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage, now: () => 1_000 });
+    await coordinator.restore();
+
+    const firstBootstrap = coordinator.bootstrap('sidepanel', {
+      hostWindowId: 9,
+      instanceToken: 'panel-a',
+    });
+    await vi.waitFor(() => expect(operations.isSourceLive).toHaveBeenCalledOnce());
+    const latestBootstrap = coordinator.bootstrap('sidepanel', {
+      hostWindowId: 9,
+      instanceToken: 'panel-b',
+    });
+    const retry = coordinator.request({
+      switchId: 'fresh-after-generation-change',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+      sourceIdentity: { hostWindowId: 90, instanceToken: 'fresh-source' },
+      targetIdentity: { hostWindowId: 9 },
+    });
+    await vi.waitFor(() => expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      switchId: 'fresh-after-generation-change',
+      phase: 'awaiting-ready',
+    }));
+
+    sourceLiveness.resolve(true);
+    await expect(firstBootstrap).resolves.toBeUndefined();
+    await expect(latestBootstrap).resolves.toMatchObject({
+      switchId: 'fresh-after-generation-change',
+      phase: 'awaiting-ready',
+      targetIdentity: { hostWindowId: 9, instanceToken: 'panel-b' },
+    });
+    expect(operations.closeSidePanel).not.toHaveBeenCalled();
+
+    await coordinator.ready({
+      switchId: 'fresh-after-generation-change',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+      targetIdentity: { hostWindowId: 9, instanceToken: 'panel-b' },
+    });
+    await expect(retry).resolves.toEqual({
+      ok: true,
+      switchId: 'fresh-after-generation-change',
+    });
+  });
+
   it('closes the replacement generation instead of clearing a restored full-token tombstone', async () => {
     const storage = new MemoryStorage();
     storage.values.set(ABANDONED_TARGET_KEY, {

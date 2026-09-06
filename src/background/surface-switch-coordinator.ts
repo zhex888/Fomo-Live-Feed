@@ -1608,10 +1608,14 @@ export class SurfaceSwitchCoordinator {
         existingClaim.identity = { ...identity };
         existingClaim.epoch += 1;
       }
+      const callerEpoch = existingClaim.epoch;
       const outcome = await existingClaim.promise!;
+      const callerStillOwnsGeneration = existingClaim.epoch === callerEpoch
+        && this.sameSurfaceIdentity(existingClaim.identity, identity);
+      if (outcome === 'superseded' && !callerStillOwnsGeneration) return 'reconciled';
       if (
         outcome === 'target-changed'
-        && this.sameSurfaceIdentity(existingClaim.identity, identity)
+        && callerStillOwnsGeneration
       ) return 'retry';
       return outcome === 'target-changed' ? 'reconciled' : outcome;
     }
@@ -1624,14 +1628,18 @@ export class SurfaceSwitchCoordinator {
       superseded: false,
       promise: undefined,
     };
+    const callerEpoch = claim.epoch;
     const operation = this.reconcileClaimedAbandonedTarget(claim);
     claim.promise = operation;
     this.abandonedTargetClaim = claim;
     try {
       const outcome = await operation;
+      const callerStillOwnsGeneration = claim.epoch === callerEpoch
+        && this.sameSurfaceIdentity(claim.identity, identity);
+      if (outcome === 'superseded' && !callerStillOwnsGeneration) return 'reconciled';
       if (
         outcome === 'target-changed'
-        && this.sameSurfaceIdentity(claim.identity, identity)
+        && callerStillOwnsGeneration
       ) return 'retry';
       return outcome === 'target-changed' ? 'reconciled' : outcome;
     } finally {
