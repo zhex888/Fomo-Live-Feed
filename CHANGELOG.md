@@ -9,6 +9,49 @@ the installation archive and checksum from the corresponding GitHub Release.
 
 ## [Unreleased]
 
+### 新增与优化
+
+- 将可选悬浮模式升级为始终置顶的 Document Picture-in-Picture 信息流。
+  侧边栏先与小型激活宿主完成原子切换，用户一次直接点击后打开 PiP；
+  PiP 就绪后宿主最小化，全程只保留一个可交互信息流。
+- PiP 完整复用当前紧凑信息流、连接状态、筛选、设置、支持、交易员备注、
+  翻译、未读和声音行为；在 Chrome 标签页之间切换或导航时仍保持在最前，
+  且不占用侧边栏宽度。
+- 新增 PiP 内“返回侧边栏”原子切换、原生关闭后宿主恢复、失败重试、重复
+  激活去重与扩展重载恢复；不增加权限，不使用普通弹窗作为伪置顶降级。
+
+### 验证
+
+- 新增真实 Chromium Document PiP 端到端覆盖，验证同步数据、跨标签页保持、
+  单一信息流、重复激活、原生关闭、被拒绝的激活、原子返回和 stale session
+  重载安全性。
+- 新增完整的手工验证矩阵，覆盖尺寸、主题、语言、筛选、设置、支持、
+  备注、翻译、未读、声音、恢复与不占用页面宽度等场景。
+
+### Added and improved
+
+- Upgraded optional floating mode to an always-on-top Document
+  Picture-in-Picture feed. The Side Panel first completes an atomic handoff to
+  a compact activation host; one direct user action opens PiP, and the host is
+  minimized after PiP readiness so only one interactive feed remains.
+- Reused the complete compact feed composition in PiP, including connection
+  state, filters, Settings, Support, trader annotations, translation, unread
+  state, and sound behavior. PiP remains above Chrome tabs during tab changes
+  and navigation without consuming Side Panel width.
+- Added atomic **Return to Side Panel**, native-close host recovery, retryable
+  failures, repeated-activation deduplication, and safe extension-reload
+  recovery. No permissions or ordinary-popup always-on-top fallback were added.
+
+### Validation
+
+- Added real-Chromium Document PiP end-to-end coverage for synchronized state,
+  cross-tab persistence, a single interactive feed, repeated activation,
+  native close, activation rejection, atomic return, and stale-session reload
+  safety.
+- Added a complete manual matrix for sizing, locale, theme, filters, Settings,
+  Support, annotations, translation, unread state, sound, recovery, and zero
+  Side Panel width while PiP is active.
+
 ## [0.4.0] - 2026-09-06
 
 ### 新增与优化

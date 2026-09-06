@@ -523,6 +523,139 @@ class AttachedTarget {
 
 const attachedSidePanels = new Set<AttachedTarget>();
 const SETTINGS_TOGGLE = '[data-testid="settings-toggle"]';
+const FLOATING_HOST_URL = (): string =>
+  `chrome-extension://${extensionId}/floatpanel.html`;
+const PIP_ACTIVATION_BUTTON = '.floating-primary-action';
+
+interface PipDomSnapshot {
+  open: boolean;
+  bodyText: string;
+  feedCount: number;
+  eventCount: number;
+  returnActionCount: number;
+}
+
+const sidePanelTargetCount = async (cdp: CDPSession): Promise<number> => {
+  const result = await cdp.send('Target.getTargets') as {
+    targetInfos?: Array<{ url?: string }>;
+  };
+  return (result.targetInfos ?? []).filter(
+    (target) => target.url === `chrome-extension://${extensionId}/sidepanel.html`,
+  ).length;
+};
+
+async function waitForFloatingHost(): Promise<Page> {
+  if (context === null) throw new Error('extension browser context is unavailable');
+  let host: Page | undefined;
+  await expect.poll(() => {
+    host = context!.pages().find((page) => page.url() === FLOATING_HOST_URL());
+    return host !== undefined;
+  }, { timeout: 15_000 }).toBe(true);
+  if (host === undefined) throw new Error('floating activation host did not open');
+  return host;
+}
+
+async function openFloatingHostDirectly(panel: AttachedTarget): Promise<Page> {
+  await panel.evaluate(`(() => {
+    globalThis.__fomoFloatOpenResult = null;
+    void chrome.runtime.sendMessage({
+      protocolVersion: 1,
+      type: "float.open"
+    }).then((result) => {
+      globalThis.__fomoFloatOpenResult = result;
+    });
+    return true;
+  })()`);
+  await expect.poll(
+    () => panel.evaluate('globalThis.__fomoFloatOpenResult'),
+    { timeout: 15_000 },
+  ).toMatchObject({ ok: true });
+  return waitForFloatingHost();
+}
+
+const supportsRealDocumentPip = (host: Page): Promise<boolean> =>
+  host.evaluate(() => {
+    const candidate = (globalThis as typeof globalThis & {
+      documentPictureInPicture?: { requestWindow?: unknown };
+    }).documentPictureInPicture;
+    return typeof candidate?.requestWindow === 'function';
+  });
+
+const readPipDom = (host: Page, eventId: string): Promise<PipDomSnapshot> =>
+  host.evaluate((expectedEventId) => {
+    const pip = (globalThis as typeof globalThis & {
+      documentPictureInPicture?: { window?: Window | null };
+    }).documentPictureInPicture?.window;
+    if (pip === undefined || pip === null || pip.closed) {
+      return {
+        open: false,
+        bodyText: '',
+        feedCount: 0,
+        eventCount: 0,
+        returnActionCount: 0,
+      };
+    }
+    const pipDocument = pip.document;
+    return {
+      open: true,
+      bodyText: pipDocument.body.innerText,
+      feedCount: pipDocument.querySelectorAll('.popup-feed').length,
+      eventCount: pipDocument.querySelectorAll(
+        `[data-event-id="${CSS.escape(expectedEventId)}"]`,
+      ).length,
+      returnActionCount: [...pipDocument.querySelectorAll('button')].filter(
+        (button) => button.textContent?.trim() === 'Return to Side Panel',
+      ).length,
+    };
+  }, eventId);
+
+const clickPipButton = async (host: Page, label: string): Promise<void> => {
+  const clicked = await host.evaluate((expectedLabel) => {
+    const pip = (globalThis as typeof globalThis & {
+      documentPictureInPicture?: { window?: Window | null };
+    }).documentPictureInPicture?.window;
+    const button = pip === undefined || pip === null
+      ? undefined
+      : [...pip.document.querySelectorAll('button')].find(
+        (candidate) => candidate.textContent?.trim() === expectedLabel,
+      );
+    if (button?.tagName !== 'BUTTON') return false;
+    (button as HTMLButtonElement).click();
+    return true;
+  }, label);
+  if (!clicked) throw new Error(`Document PiP button is unavailable: ${label}`);
+};
+
+const closeDocumentPip = async (host: Page): Promise<void> => {
+  if (host.isClosed()) return;
+  await host.evaluate(() => {
+    const pip = (globalThis as typeof globalThis & {
+      documentPictureInPicture?: { window?: Window | null };
+    }).documentPictureInPicture?.window;
+    if (pip !== undefined && pip !== null && !pip.closed) pip.close();
+  }).catch(() => {});
+};
+
+async function switchToFloatingHost(
+  panel: AttachedTarget,
+  cdp: CDPSession,
+  eventId: string,
+): Promise<Page> {
+  await ensureSettingsOpen(panel);
+  await panel.clickWithUserGesture(
+    '.settings-display-mode-switcher .display-mode-switcher-button:nth-of-type(2)',
+  );
+  const host = await waitForFloatingHost();
+
+  // The destination must render the synchronized event before the source is
+  // allowed to disappear. Checking the host first preserves that ordering in
+  // the observable E2E trace rather than merely checking both final states.
+  await expect(host.locator(`[data-event-id="${eventId}"]`)).toHaveCount(1);
+  await expect(host.locator(PIP_ACTIVATION_BUTTON)).toBeVisible();
+  await expect.poll(() => sidePanelTargetCount(cdp), { timeout: 15_000 }).toBe(0);
+  await panel.dispose();
+  return host;
+}
 
 async function ensureSettingsState(panel: AttachedTarget, open: boolean): Promise<void> {
   const expected = String(open);
@@ -805,91 +938,7 @@ test.describe('Fomo Live Feed extension', () => {
     expect(manifest.host_permissions).toEqual(EXPECTED_EXPLICIT_HOSTS);
   });
 
-  test('opens one real floating feed window and focuses it on repeated requests', async () => {
-    if (context === null || extensionId === null) {
-      throw new Error('extension browser context is not available');
-    }
-
-    const fomoPage = await context.newPage();
-    await fomoPage.goto(fomoUrl());
-    const cdp = await context.newCDPSession(fomoPage);
-    const panel = await openSidePanel(cdp, await fomoTabId());
-
-    const requestFloatingWindow = async (): Promise<{
-      ok: boolean;
-      windowId?: number;
-      created?: boolean;
-    }> => {
-      await panel.evaluate(`(() => {
-        globalThis.__fomoFloatOpenResult = null;
-        void chrome.runtime.sendMessage({
-          protocolVersion: 1,
-          type: "float.open"
-        }).then((result) => {
-          globalThis.__fomoFloatOpenResult = result;
-        });
-        return true;
-      })()`);
-
-      let result:
-        | { ok: boolean; windowId?: number; created?: boolean }
-        | null
-        | undefined;
-      await expect.poll(async () => {
-        result = await panel.evaluate<{
-          ok: boolean;
-          windowId?: number;
-          created?: boolean;
-        } | null>('globalThis.__fomoFloatOpenResult');
-        return result !== null && result !== undefined;
-      }, { timeout: 15_000 }).toBe(true);
-
-      if (result === null || result === undefined) {
-        throw new Error('floating-window request returned no result');
-      }
-      return result;
-    };
-
-    let floatingPage: Page | undefined;
-
-    try {
-      const first = await requestFloatingWindow();
-      expect(first).toMatchObject({ ok: true, created: true });
-
-      await expect.poll(() => {
-        const pages = context!.pages().filter(
-          (page) => page.url() === `chrome-extension://${extensionId}/floatpanel.html`,
-        );
-        floatingPage = pages[0];
-        return pages.length;
-      }, { timeout: 15_000 }).toBe(1);
-
-      if (floatingPage === undefined) {
-        throw new Error('floating feed page is unavailable');
-      }
-
-      await expect(floatingPage.locator('.sidepanel-root')).toBeVisible();
-      await expect(floatingPage.locator('.popup-feed')).toBeVisible();
-
-      const second = await requestFloatingWindow();
-      expect(second).toMatchObject({
-        ok: true,
-        created: false,
-        windowId: first.windowId,
-      });
-      expect(
-        context.pages().filter(
-          (page) => page.url() === `chrome-extension://${extensionId}/floatpanel.html`,
-        ),
-      ).toHaveLength(1);
-    } finally {
-      await floatingPage?.close();
-      await panel.close();
-      await fomoPage.close();
-    }
-  });
-
-  test('atomically switches between Side Panel and floating window without losing feed state', async () => {
+  test('always-on-top PiP keeps one synchronized feed across tab changes and returns atomically', async () => {
     if (context === null || extensionId === null || worker === null) {
       throw new Error('extension browser context is not available');
     }
@@ -900,52 +949,243 @@ test.describe('Fomo Live Feed extension', () => {
     await emit(fomoPage, uniquePayload(901));
     const cdp = await context.newCDPSession(fomoPage);
     const panel = await openSidePanel(cdp, await fomoTabId());
-    let floatingPage: Page | undefined;
+    let host: Page | undefined;
     let reopenedPanel: AttachedTarget | undefined;
-
-    const sidePanelTargetCount = async (): Promise<number> => {
-      const result = await cdp.send('Target.getTargets') as {
-        targetInfos?: Array<{ url?: string }>;
-      };
-      return (result.targetInfos ?? []).filter(
-        (target) => target.url === `chrome-extension://${extensionId}/sidepanel.html`,
-      ).length;
-    };
+    let secondTab: Page | undefined;
+    const eventId = 'fomo:overflow-901';
 
     try {
       await expect.poll(() => panel.hasText('$TOKEN901'), { timeout: 15_000 }).toBe(true);
-      await ensureSettingsOpen(panel);
-      await panel.clickWithUserGesture(
-        '.settings-display-mode-switcher .display-mode-switcher-button:nth-of-type(2)',
-      );
-
-      await expect.poll(() => {
-        floatingPage = context!.pages().find(
-          (page) => page.url() === `chrome-extension://${extensionId}/floatpanel.html`,
-        );
-        return floatingPage !== undefined;
-      }, { timeout: 15_000 }).toBe(true);
+      await markSocketOpen(fomoPage);
+      await expect.poll(() => panel.hasText('Connected'), { timeout: 15_000 }).toBe(true);
+      host = await switchToFloatingHost(panel, cdp, eventId);
       await expect.poll(async () => (await readStoredSettings()).displayMode, {
         timeout: 15_000,
       }).toBe('floating');
-      await panel.dispose();
 
-      if (floatingPage === undefined) throw new Error('floating target did not open');
-      await expect(floatingPage.getByText('$TOKEN901')).toHaveCount(1);
-      await floatingPage.locator(SETTINGS_TOGGLE).click();
-      await floatingPage.getByRole('button', { name: 'Side panel' }).click();
+      const supported = await supportsRealDocumentPip(host);
+      test.skip(!supported, 'This Chromium build does not expose the real Document PiP API');
 
-      await expect.poll(() => floatingPage!.isClosed(), { timeout: 15_000 }).toBe(true);
-      await expect.poll(sidePanelTargetCount, { timeout: 15_000 }).toBe(1);
+      await host.locator(PIP_ACTIVATION_BUTTON).click();
+      await expect.poll(() => readPipDom(host!, eventId), { timeout: 15_000 }).toMatchObject({
+        open: true,
+        feedCount: 1,
+        eventCount: 1,
+        returnActionCount: 1,
+      });
+      await expect(host.locator('.popup-feed')).toHaveCount(0);
+
+      secondTab = await context.newPage();
+      await secondTab.goto(tradingUrl());
+      await fomoPage.bringToFront();
+      await secondTab.bringToFront();
+      await secondTab.goto(`${tradingUrl()}?navigated=1`);
+
+      await expect.poll(() => readPipDom(host!, eventId), { timeout: 15_000 }).toMatchObject({
+        open: true,
+        feedCount: 1,
+        eventCount: 1,
+      });
+      expect((await readPipDom(host, eventId)).bodyText).toContain('Connected');
+
+      await clickPipButton(host, 'Return to Side Panel');
+      await expect.poll(() => sidePanelTargetCount(cdp), { timeout: 15_000 }).toBe(1);
       reopenedPanel = await attachSidePanelTarget(cdp);
       await expect.poll(() => reopenedPanel!.hasText('$TOKEN901'), { timeout: 15_000 }).toBe(true);
+      await expect.poll(() => host!.isClosed(), { timeout: 15_000 }).toBe(true);
       expect((await readStoredSettings()).displayMode).toBe('sidepanel');
     } finally {
       await panel.dispose();
       await reopenedPanel?.close();
-      await floatingPage?.close();
+      if (host !== undefined) {
+        await closeDocumentPip(host);
+        await host.close().catch(() => {});
+      }
+      await secondTab?.close();
       await fomoPage.close();
-      await deleteStoredEvents(['fomo:overflow-901']);
+      await deleteStoredEvents([eventId]);
+    }
+  });
+
+  test('always-on-top activation ignores a repeated trusted click and keeps one PiP feed', async () => {
+    await seedStoredSettings({ displayMode: 'sidepanel' });
+    const fomoPage = await context!.newPage();
+    await fomoPage.goto(fomoUrl());
+    await emit(fomoPage, uniquePayload(902));
+    const cdp = await context!.newCDPSession(fomoPage);
+    const panel = await openSidePanel(cdp, await fomoTabId());
+    let host: Page | undefined;
+    const eventId = 'fomo:overflow-902';
+
+    try {
+      await expect.poll(() => panel.hasText('$TOKEN902'), { timeout: 15_000 }).toBe(true);
+      host = await switchToFloatingHost(panel, cdp, eventId);
+      const supported = await supportsRealDocumentPip(host);
+      test.skip(!supported, 'This Chromium build does not expose the real Document PiP API');
+
+      await host.locator(PIP_ACTIVATION_BUTTON).click({ clickCount: 2 });
+      await expect.poll(() => readPipDom(host!, eventId), { timeout: 15_000 }).toMatchObject({
+        open: true,
+        feedCount: 1,
+        eventCount: 1,
+      });
+      expect(context!.pages().filter((page) => page.url() === FLOATING_HOST_URL())).toHaveLength(1);
+      await expect(host.locator('.popup-feed')).toHaveCount(0);
+    } finally {
+      await panel.dispose();
+      if (host !== undefined) {
+        await closeDocumentPip(host);
+        await host.close().catch(() => {});
+      }
+      await fomoPage.close();
+      await deleteStoredEvents([eventId]);
+    }
+  });
+
+  test('always-on-top native close restores the host recovery controls and synchronized feed', async () => {
+    await seedStoredSettings({ displayMode: 'sidepanel' });
+    const fomoPage = await context!.newPage();
+    await fomoPage.goto(fomoUrl());
+    await emit(fomoPage, uniquePayload(903));
+    const cdp = await context!.newCDPSession(fomoPage);
+    const panel = await openSidePanel(cdp, await fomoTabId());
+    let host: Page | undefined;
+    const eventId = 'fomo:overflow-903';
+
+    try {
+      await expect.poll(() => panel.hasText('$TOKEN903'), { timeout: 15_000 }).toBe(true);
+      host = await switchToFloatingHost(panel, cdp, eventId);
+      const supported = await supportsRealDocumentPip(host);
+      test.skip(!supported, 'This Chromium build does not expose the real Document PiP API');
+
+      await host.locator(PIP_ACTIVATION_BUTTON).click();
+      await expect.poll(() => readPipDom(host!, eventId), { timeout: 15_000 }).toMatchObject({
+        open: true,
+        eventCount: 1,
+      });
+      await closeDocumentPip(host);
+
+      await expect(host.locator('.floating-surface-host')).toHaveAttribute('data-state', 'recovery');
+      await expect(host.getByRole('button', { name: 'Reopen always-on-top window' })).toBeVisible();
+      await expect(host.getByRole('button', { name: 'Return to Side Panel' })).toBeVisible();
+      await expect(host.locator(`[data-event-id="${eventId}"]`)).toHaveCount(1);
+    } finally {
+      await panel.dispose();
+      if (host !== undefined) await host.close().catch(() => {});
+      await fomoPage.close();
+      await deleteStoredEvents([eventId]);
+    }
+  });
+
+  test('always-on-top activation rejection preserves the host feed and exposes retry', async () => {
+    await seedStoredSettings({ displayMode: 'sidepanel' });
+    const fomoPage = await context!.newPage();
+    await fomoPage.goto(fomoUrl());
+    await emit(fomoPage, uniquePayload(904));
+    const cdp = await context!.newCDPSession(fomoPage);
+    const panel = await openSidePanel(cdp, await fomoTabId());
+    let host: Page | undefined;
+    const eventId = 'fomo:overflow-904';
+
+    try {
+      await expect.poll(() => panel.hasText('$TOKEN904'), { timeout: 15_000 }).toBe(true);
+      host = await openFloatingHostDirectly(panel);
+      await expect(host.locator(`[data-event-id="${eventId}"]`)).toHaveCount(1);
+      await expect(host.locator(PIP_ACTIVATION_BUTTON)).toBeVisible();
+      const supported = await supportsRealDocumentPip(host);
+      test.skip(!supported, 'This Chromium build does not expose the real Document PiP API');
+
+      // Preserve the real feature-support gate, then inject only the browser
+      // rejection at the native API boundary. No ordinary popup or successful
+      // fake PiP surface is substituted for Document PiP.
+      await host.evaluate(() => {
+        const api = (globalThis as typeof globalThis & {
+          documentPictureInPicture: { requestWindow(options?: unknown): Promise<Window> };
+        }).documentPictureInPicture;
+        Object.defineProperty(api, 'requestWindow', {
+          configurable: true,
+          value: () => Promise.reject(new DOMException('User denied Picture-in-Picture', 'NotAllowedError')),
+        });
+      });
+      await host.evaluate((selector) => {
+        const button = document.querySelector(selector);
+        if (!(button instanceof HTMLButtonElement)) throw new Error('activation button missing');
+        button.click();
+      }, PIP_ACTIVATION_BUTTON);
+
+      await expect(host.locator('.floating-surface-host')).toHaveAttribute('data-state', 'error');
+      await expect(host.getByRole('button', { name: 'Try again' })).toBeVisible();
+      await expect(host.locator(`[data-event-id="${eventId}"]`)).toHaveCount(1);
+      await expect.poll(() => readPipDom(host!, eventId)).toMatchObject({ open: false });
+    } finally {
+      await panel.dispose();
+      if (host !== undefined) await host.close().catch(() => {});
+      await fomoPage.close();
+      await deleteStoredEvents([eventId]);
+    }
+  });
+
+  test('always-on-top extension reload does not resurrect a stale PiP session or fallback window', async () => {
+    if (server === null) throw new Error('fixture server is unavailable');
+    const reloadProfile = mkdtempSync(path.join(os.tmpdir(), 'fomo-e2e-reload-profile-'));
+    let reloadContext: BrowserContext | undefined;
+    try {
+      reloadContext = await chromium.launchPersistentContext(reloadProfile, {
+        channel: 'chromium',
+        headless: !HEADED,
+        locale: 'en-US',
+        args: [
+          `--disable-extensions-except=${EXTENSION_DIR}`,
+          `--load-extension=${EXTENSION_DIR}`,
+          `--proxy-server=127.0.0.1:${server.port}`,
+          '--disable-quic',
+          '--ignore-certificate-errors',
+        ],
+      });
+      let reloadWorker = reloadContext.serviceWorkers()[0];
+      await expect.poll(() => {
+        reloadWorker = reloadContext!.serviceWorkers()[0];
+        return reloadWorker !== undefined;
+      }, { timeout: 15_000 }).toBe(true);
+      if (reloadWorker === undefined) throw new Error('isolated extension worker is unavailable');
+      const reloadExtensionId = new URL(reloadWorker.url()).host;
+      await reloadWorker.evaluate(async () => {
+        const chromeApi = (globalThis as unknown as {
+          chrome: { storage: { session: { set(items: Record<string, unknown>): Promise<void> } } };
+        }).chrome;
+        await chromeApi.storage.session.set({
+          'floatWindow.windowId': 987_654,
+          'floatWindow.ownerWindowId': 123,
+          'floatWindow.pipSession.v1': {
+            sessionId: 'stale-e2e-pip-session',
+            hostWindowId: 987_654,
+            phase: 'ready',
+          },
+        });
+      });
+
+      const extensionsPage = await reloadContext.newPage();
+      await extensionsPage.goto('chrome://extensions');
+      const reloadButton = extensionsPage.locator(
+        `extensions-item#${reloadExtensionId} #dev-reload-button`,
+      );
+      await expect(reloadButton).toBeVisible();
+      await reloadButton.click();
+
+      await expect.poll(async () => {
+        try {
+          await reloadWorker!.evaluate(() => true);
+          return false;
+        } catch {
+          return true;
+        }
+      }, { timeout: 15_000 }).toBe(true);
+      expect(reloadContext.pages().filter(
+        (page) => page.url() === `chrome-extension://${reloadExtensionId}/floatpanel.html`,
+      )).toHaveLength(0);
+    } finally {
+      await reloadContext?.close();
+      rmSync(reloadProfile, { recursive: true, force: true });
     }
   });
 
