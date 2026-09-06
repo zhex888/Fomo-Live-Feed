@@ -38,6 +38,7 @@
               <button id="tab-feed" class="demo-tab active" role="tab" aria-selected="true" aria-controls="demo-feed" tabindex="0" data-demo-tab="feed">实时动态</button>
               <button id="tab-filters" class="demo-tab" role="tab" aria-selected="false" aria-controls="demo-filters" tabindex="-1" data-demo-tab="filters">筛选</button>
               <button id="tab-settings" class="demo-tab" role="tab" aria-selected="false" aria-controls="demo-settings" tabindex="-1" data-demo-tab="settings">设置</button>
+              <button id="tab-display-mode" class="demo-tab" role="tab" aria-selected="false" aria-controls="demo-display-mode" tabindex="-1" data-demo-tab="display-mode">显示模式</button>
             </div>
             <div id="demo-feed" class="demo-panel" role="tabpanel" aria-labelledby="tab-feed" data-demo-panel="feed">
               <div class="panel-header"><div><img src="./assets/icons/icon-128.png" alt="" /><span><b>Fomo Live Feed</b><small>关注交易员动态</small></span></div><div class="panel-tools" aria-hidden="true"><span><svg class="ui-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg></span><span><svg class="ui-icon" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 5v14" /></svg></span><span><svg class="ui-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" /></svg></span></div></div>
@@ -51,6 +52,12 @@
             </div>
             <div id="demo-settings" class="demo-panel" role="tabpanel" aria-labelledby="tab-settings" data-demo-panel="settings" hidden>
               <div class="panel-title"><span><b>设置</b><small>偏好保存在当前浏览器</small></span><span class="local-badge">LOCAL</span></div><div class="setting-row"><span><b>买入提示音</b><small>仅响应实时买入，默认关闭</small></span><span class="switch"><i></i></span></div><div class="setting-row"><span><b>观点翻译</b><small>优先使用 Chrome 设备端翻译</small></span><span class="switch on"><i></i></span></div><div class="setting-row"><span><b>界面语言</b><small>English / 简体中文</small></span><span class="select-value">中文⌄</span></div><div class="setting-row"><span><b>界面主题</b><small>浅色 / 深色</small></span><span class="theme-value"><i></i><i class="active"></i></span></div><div class="panel-foot"><span>Chrome storage.local</span><span>自动保存</span></div>
+            </div>
+            <div id="demo-display-mode" class="demo-panel" role="tabpanel" aria-labelledby="tab-display-mode" data-demo-panel="display-mode" hidden>
+              <div class="panel-title"><span><b>显示模式</b><small>一个信息流，两种窗口形态</small></span><span class="local-badge">SYNC</span></div>
+              <div class="display-mode-options" aria-label="显示模式示例"><span class="display-mode-option active">侧边栏</span><span class="display-mode-option">悬浮窗</span></div>
+              <div class="floating-demo"><div class="floating-demo-window"><div class="floating-demo-title"><i></i><span>Fomo 实时动态</span><em>全局唯一</em></div><div class="floating-demo-row"><b>Anon Alpha</b><span>买入 $MORPHO</span><strong>$24.8K</strong></div><div class="floating-demo-row"><b>KOL Radar</b><span>观点 · Base</span><strong>MC: $4.2M</strong></div></div></div>
+              <div class="panel-foot"><span>历史、筛选、备注与未读状态保持同步</span><span>记住窗口位置</span></div>
             </div>
           </div>
         </div>

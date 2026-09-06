@@ -71,11 +71,17 @@ test('downloads the current v0.4.0 Chrome package', () => {
   );
 });
 
-test('the product demo exposes three accessible tabs', () => {
-  assert.equal((html.match(/role="tab"/g) ?? []).length, 3);
-  assert.equal((html.match(/role="tabpanel"/g) ?? []).length, 3);
+test('the product demo exposes four accessible tabs', () => {
+  assert.equal((html.match(/role="tab"/g) ?? []).length, 4);
+  assert.equal((html.match(/role="tabpanel"/g) ?? []).length, 4);
   assert.match(html, /aria-controls="demo-feed"/);
   assert.match(html, /aria-labelledby="tab-feed"/);
+  assert.match(html, /id="tab-display-mode"/);
+  assert.match(html, /aria-controls="demo-display-mode"/);
+  assert.match(html, /id="demo-display-mode"/);
+  assert.match(html, /aria-labelledby="tab-display-mode"/);
+  assert.match(html, /data-demo-tab="display-mode"/);
+  assert.match(html, /data-demo-panel="display-mode"/);
 });
 
 test('supports keyboard navigation between demo tabs', () => {
