@@ -103,6 +103,27 @@ describe('createSurfaceSwitchClient', () => {
     });
   });
 
+  it('accepts a strict target-closed cleanup transaction', async () => {
+    const client = createSurfaceSwitchClient({
+      sendMessage: vi.fn(async () => ({
+        ok: true,
+        transaction: {
+          switchId: 'switch-1',
+          source: 'floating',
+          target: 'sidepanel',
+          sourceWindowId: 7,
+          phase: 'target-closed',
+          startedAt: 900,
+        },
+      })),
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    }, () => 1_000);
+
+    await expect(client.bootstrap('sidepanel', 7)).resolves.toMatchObject({
+      transaction: { phase: 'target-closed' },
+    });
+  });
+
   it('rejects malformed switch and bootstrap responses', async () => {
     const sendMessage = vi.fn(async (message: unknown) => (
       (message as { type: string }).type === 'surface.bootstrap'

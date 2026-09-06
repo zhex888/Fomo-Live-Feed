@@ -21,7 +21,7 @@ export interface SurfaceReady {
 }
 
 export interface SwitchTransaction extends SurfaceSwitchRequest {
-  phase: 'opening' | 'awaiting-ready' | 'closing-source' | 'closing-target';
+  phase: 'opening' | 'awaiting-ready' | 'closing-source' | 'closing-target' | 'target-closed';
   startedAt: number;
 }
 
@@ -69,11 +69,15 @@ type TargetOpenOutcome = 'not-opened' | 'opened' | 'target-live';
 
 interface DetachedTargetCleanup {
   transaction: SwitchTransaction;
-  state: 'pending-admission' | 'cleanup';
+  state: 'pending-admission' | 'cleanup' | 'marking-closed' | 'clearing';
   opening: Promise<boolean> | undefined;
   cleanup: Promise<boolean> | undefined;
+  durableMarker: Promise<boolean> | undefined;
+  durableClear: Promise<boolean> | undefined;
   timer: ReturnType<typeof setTimeout> | undefined;
-  retriesRemaining: number;
+  targetCloseRetriesRemaining: number;
+  durableMarkerRetriesRemaining: number;
+  durableClearRetriesRemaining: number;
 }
 
 const TRANSACTION_KEYS = [
@@ -106,7 +110,13 @@ export function parseSwitchTransaction(
     || !Number.isInteger(item.startedAt)
     || (item.startedAt as number) < 0
     || (item.startedAt as number) > now
-    || !['opening', 'awaiting-ready', 'closing-source', 'closing-target'].includes(String(item.phase))
+    || ![
+      'opening',
+      'awaiting-ready',
+      'closing-source',
+      'closing-target',
+      'target-closed',
+    ].includes(String(item.phase))
   ) return undefined;
   return item as unknown as SwitchTransaction;
 }
@@ -163,10 +173,13 @@ export class SurfaceSwitchCoordinator {
       stored[SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY],
       this.now(),
     );
-    const transaction = parseSwitchTransaction(
+    const parsedMainTransaction = parseSwitchTransaction(
       stored[SURFACE_SWITCH_STORAGE_KEY],
       this.now(),
     );
+    const transaction = parsedMainTransaction?.phase === 'target-closed'
+      ? undefined
+      : parsedMainTransaction;
     const mainOwnsDetached = transaction !== undefined
       && detachedTransaction !== undefined
       && transaction.switchId === detachedTransaction.switchId
@@ -175,11 +188,15 @@ export class SurfaceSwitchCoordinator {
         || this.now() - transaction.startedAt < this.timeoutMs
       );
     if (
-      detachedTransaction?.phase === 'closing-target'
+      (detachedTransaction?.phase === 'closing-target'
+        || detachedTransaction?.phase === 'target-closed')
       && !mainOwnsDetached
       && this.detachedTargetCleanup === undefined
     ) {
-      const cleanup = this.createDetachedTargetCleanup(detachedTransaction, 'cleanup');
+      const cleanup = this.createDetachedTargetCleanup(
+        detachedTransaction,
+        detachedTransaction.phase === 'target-closed' ? 'clearing' : 'cleanup',
+      );
       this.detachedTargetCleanup = cleanup;
       this.scheduleDetachedTargetCleanup(cleanup);
     } else if (
@@ -253,9 +270,16 @@ export class SurfaceSwitchCoordinator {
   }
 
   request(request: SurfaceSwitchRequest): Promise<SurfaceSwitchResult> {
+    if (this.restoreAdmissionBlocked && this.restoring === undefined) {
+      void this.restore().catch(() => {});
+      return Promise.resolve({
+        ok: false,
+        switchId: request.switchId,
+        reason: 'switch-in-progress',
+      });
+    }
     if (
       this.restoring !== undefined
-      || this.restoreAdmissionBlocked
       || this.trustedRestoreAdmission !== undefined
       || this.detachedTargetCleanup !== undefined
     ) {
@@ -701,18 +725,29 @@ export class SurfaceSwitchCoordinator {
       state,
       opening,
       cleanup: undefined,
+      durableMarker: undefined,
+      durableClear: undefined,
       timer: undefined,
-      retriesRemaining: this.targetCloseRetryLimit,
+      targetCloseRetriesRemaining: this.targetCloseRetryLimit,
+      durableMarkerRetriesRemaining: this.targetCloseRetryLimit,
+      durableClearRetriesRemaining: this.targetCloseRetryLimit,
     };
   }
 
   private scheduleDetachedTargetCleanup(cleanup: DetachedTargetCleanup): void {
+    const retriesRemaining = cleanup.state === 'clearing'
+      ? cleanup.durableClearRetriesRemaining
+      : cleanup.state === 'marking-closed'
+        ? cleanup.durableMarkerRetriesRemaining
+        : cleanup.targetCloseRetriesRemaining;
     if (
       this.detachedTargetCleanup !== cleanup
       || cleanup.timer !== undefined
-      || cleanup.retriesRemaining <= 0
+      || retriesRemaining <= 0
     ) return;
-    cleanup.retriesRemaining -= 1;
+    if (cleanup.state === 'clearing') cleanup.durableClearRetriesRemaining -= 1;
+    else if (cleanup.state === 'marking-closed') cleanup.durableMarkerRetriesRemaining -= 1;
+    else cleanup.targetCloseRetriesRemaining -= 1;
     cleanup.timer = setTimeout(() => {
       cleanup.timer = undefined;
       void this.reconcileDetachedTargetCleanup(cleanup);
@@ -724,6 +759,10 @@ export class SurfaceSwitchCoordinator {
   ): Promise<boolean> {
     if (this.detachedTargetCleanup !== cleanup) return true;
     if (cleanup.state === 'pending-admission') return false;
+    if (cleanup.state === 'marking-closed') {
+      return this.reconcileDetachedClosedMarker(cleanup);
+    }
+    if (cleanup.state === 'clearing') return this.reconcileDetachedDurableClear(cleanup);
     if (cleanup.opening !== undefined) {
       let opened = false;
       try {
@@ -733,9 +772,7 @@ export class SurfaceSwitchCoordinator {
       }
       cleanup.opening = undefined;
       if (!opened) {
-        this.releaseDetachedTargetCleanup(cleanup);
-        await this.clearDetachedStored().catch(() => {});
-        return true;
+        return this.markDetachedTargetClosed(cleanup);
       }
     }
     if (cleanup.cleanup === undefined) {
@@ -751,8 +788,54 @@ export class SurfaceSwitchCoordinator {
       this.scheduleDetachedTargetCleanup(cleanup);
       return false;
     }
+    return this.markDetachedTargetClosed(cleanup);
+  }
+
+  private markDetachedTargetClosed(cleanup: DetachedTargetCleanup): Promise<boolean> {
+    cleanup.transaction.phase = 'target-closed';
+    cleanup.state = 'marking-closed';
+    return this.reconcileDetachedClosedMarker(cleanup);
+  }
+
+  private async reconcileDetachedClosedMarker(
+    cleanup: DetachedTargetCleanup,
+  ): Promise<boolean> {
+    if (this.detachedTargetCleanup !== cleanup) return true;
+    if (cleanup.durableMarker === undefined) {
+      cleanup.durableMarker = this.persistDetached(cleanup.transaction).then(
+        () => true,
+        () => false,
+      );
+    }
+    const operation = cleanup.durableMarker;
+    const marked = await operation;
+    if (cleanup.durableMarker === operation) cleanup.durableMarker = undefined;
+    if (!marked) {
+      this.scheduleDetachedTargetCleanup(cleanup);
+      return false;
+    }
+    cleanup.state = 'clearing';
+    return this.reconcileDetachedDurableClear(cleanup);
+  }
+
+  private async reconcileDetachedDurableClear(
+    cleanup: DetachedTargetCleanup,
+  ): Promise<boolean> {
+    if (this.detachedTargetCleanup !== cleanup) return true;
+    if (cleanup.durableClear === undefined) {
+      cleanup.durableClear = this.clearDetachedStored().then(
+        () => true,
+        () => false,
+      );
+    }
+    const operation = cleanup.durableClear;
+    const cleared = await operation;
+    if (cleanup.durableClear === operation) cleanup.durableClear = undefined;
+    if (!cleared) {
+      this.scheduleDetachedTargetCleanup(cleanup);
+      return false;
+    }
     this.releaseDetachedTargetCleanup(cleanup);
-    await this.clearDetachedStored().catch(() => {});
     return true;
   }
 
