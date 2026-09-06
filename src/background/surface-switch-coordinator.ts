@@ -25,6 +25,7 @@ export interface SwitchTransaction extends SurfaceSwitchRequest {
     | 'opening'
     | 'awaiting-ready'
     | 'closing-source'
+    | 'rolling-back-mode'
     | 'closing-target'
     | 'target-closed'
     | 'source-closed';
@@ -66,8 +67,13 @@ interface ActiveSwitch {
   opening?: Promise<TargetOpenOutcome>;
   settling?: Promise<SurfaceSwitchResult>;
   targetCleanup: Promise<boolean> | undefined;
+  sourceCleanup: Promise<'closed' | 'save-failed' | 'close-failed'> | undefined;
+  modeRollback: Promise<boolean> | undefined;
   targetCleanupTimer: ReturnType<typeof setTimeout> | undefined;
   targetCloseRetriesRemaining: number;
+  phasePersistence: Promise<boolean> | undefined;
+  phasePersisted: boolean;
+  phasePersistRetriesRemaining: number;
   durableMarker: Promise<boolean> | undefined;
   durableClear: Promise<boolean> | undefined;
   durableMarkerPersisted: boolean;
@@ -135,6 +141,7 @@ export function parseSwitchTransaction(
       'opening',
       'awaiting-ready',
       'closing-source',
+      'rolling-back-mode',
       'closing-target',
       'target-closed',
       'source-closed',
@@ -204,6 +211,8 @@ export class SurfaceSwitchCoordinator {
       && transaction.switchId === detachedTransaction.switchId
       && (
         transaction.phase === 'closing-target'
+        || transaction.phase === 'closing-source'
+        || transaction.phase === 'rolling-back-mode'
         || transaction.phase === 'target-closed'
         || transaction.phase === 'source-closed'
         || this.now() - transaction.startedAt < this.timeoutMs
@@ -236,6 +245,8 @@ export class SurfaceSwitchCoordinator {
       transaction === undefined
       || (
         transaction.phase !== 'closing-target'
+        && transaction.phase !== 'closing-source'
+        && transaction.phase !== 'rolling-back-mode'
         && transaction.phase !== 'target-closed'
         && transaction.phase !== 'source-closed'
         && this.now() - transaction.startedAt >= this.timeoutMs
@@ -248,6 +259,8 @@ export class SurfaceSwitchCoordinator {
     }
     if (
       transaction.phase === 'closing-target'
+      || transaction.phase === 'closing-source'
+      || transaction.phase === 'rolling-back-mode'
       || transaction.phase === 'target-closed'
       || transaction.phase === 'source-closed'
     ) {
@@ -282,6 +295,8 @@ export class SurfaceSwitchCoordinator {
       transaction?.target === surface
       && (
         transaction.phase === 'closing-target'
+        || transaction.phase === 'closing-source'
+        || transaction.phase === 'rolling-back-mode'
         || transaction.phase === 'target-closed'
         || transaction.phase === 'source-closed'
       )
@@ -451,8 +466,13 @@ export class SurfaceSwitchCoordinator {
       resolve,
       timeout,
       targetCleanup: undefined,
+      sourceCleanup: undefined,
+      modeRollback: undefined,
       targetCleanupTimer: undefined,
       targetCloseRetriesRemaining: this.targetCloseRetryLimit,
+      phasePersistence: undefined,
+      phasePersisted: false,
+      phasePersistRetriesRemaining: this.targetCloseRetryLimit,
       durableMarker: undefined,
       durableClear: undefined,
       durableMarkerPersisted: false,
@@ -480,8 +500,13 @@ export class SurfaceSwitchCoordinator {
       resolve: () => {},
       timeout: undefined,
       targetCleanup: undefined,
+      sourceCleanup: undefined,
+      modeRollback: undefined,
       targetCleanupTimer: undefined,
       targetCloseRetriesRemaining: this.targetCloseRetryLimit,
+      phasePersistence: undefined,
+      phasePersisted: true,
+      phasePersistRetriesRemaining: this.targetCloseRetryLimit,
       durableMarker: undefined,
       durableClear: undefined,
       durableMarkerPersisted:
@@ -504,13 +529,20 @@ export class SurfaceSwitchCoordinator {
     }
 
     const active = this.active ?? this.promoteRestoredTransaction(transaction);
+    if (active.settling !== undefined) return active.settling;
     clearTimeout(active.timeout);
+    const settlement = Promise.resolve().then(() => this.settleReady(active, ready));
+    active.settling = settlement;
+    return settlement;
+  }
 
-    transaction.phase = 'closing-source';
-    try {
-      await this.persist(transaction);
-    } catch {
-      return this.finishReadyRollback(active, {
+  private async settleReady(
+    active: ActiveSwitch,
+    ready: SurfaceReady,
+  ): Promise<SurfaceSwitchResult> {
+    this.transitionPhase(active, 'closing-source');
+    if (!await this.ensurePhasePersisted(active)) {
+      return this.completeReadyRollback(active, {
         ok: false,
         switchId: ready.switchId,
         reason: 'state-persist-failed',
@@ -518,9 +550,9 @@ export class SurfaceSwitchCoordinator {
     }
 
     try {
-      await this.options.operations.saveDisplayMode(transaction.target);
+      await this.options.operations.saveDisplayMode(active.transaction.target);
     } catch {
-      return this.finishReadyRollback(active, {
+      return this.completeReadyRollback(active, {
         ok: false,
         switchId: ready.switchId,
         reason: 'state-persist-failed',
@@ -529,22 +561,25 @@ export class SurfaceSwitchCoordinator {
 
     let closed = false;
     try {
-      closed = transaction.source === 'sidepanel'
-        ? await this.options.operations.closeSidePanel(transaction.sourceWindowId)
+      closed = active.transaction.source === 'sidepanel'
+        ? await this.options.operations.closeSidePanel(active.transaction.sourceWindowId)
         : await this.options.operations.closeFloating();
     } catch {
       closed = false;
     }
 
     if (!closed) {
-      return this.finishReadyRollback(active, {
+      return this.completeReadyRollback(active, {
         ok: false,
         switchId: ready.switchId,
         reason: 'source-close-failed',
       });
     }
 
-    return this.finishSourceClosed(active, { ok: true, switchId: ready.switchId });
+    const result: SurfaceSwitchResult = { ok: true, switchId: ready.switchId };
+    await this.markMainSourceClosed(active);
+    active.resolve(result);
+    return result;
   }
 
   private promoteRestoredTransaction(transaction: SwitchTransaction): ActiveSwitch {
@@ -558,41 +593,34 @@ export class SurfaceSwitchCoordinator {
     return active;
   }
 
-  private finishReadyRollback(
+  private async completeReadyRollback(
     active: ActiveSwitch,
     result: SurfaceSwitchResult,
   ): Promise<SurfaceSwitchResult> {
-    if (this.active !== active) return Promise.resolve(result);
-    if (active.settling !== undefined) return active.settling;
+    if (this.active !== active) return result;
     clearTimeout(active.timeout);
-    active.settling = (async () => {
-      try {
-        await this.options.operations.saveDisplayMode(active.transaction.source);
-      } catch {
-        // Target cleanup still prevents two interactive surfaces when mode rollback fails.
-      }
-      const closed = await this.attemptTargetCleanup(active);
-      if (!closed) return this.retainTargetCleanupBarrier(active, result);
-      await this.markMainTargetClosed(active);
+    this.transitionPhase(active, 'rolling-back-mode');
+    if (!await this.ensurePhasePersisted(active)) {
       active.resolve(result);
+      this.scheduleTargetCleanup(active);
       return result;
-    })();
-    return active.settling;
-  }
-
-  private finishSourceClosed(
-    active: ActiveSwitch,
-    result: SurfaceSwitchResult,
-  ): Promise<SurfaceSwitchResult> {
-    if (this.active !== active) return Promise.resolve(result);
-    if (active.settling !== undefined) return active.settling;
-    clearTimeout(active.timeout);
-    active.settling = (async () => {
-      await this.markMainSourceClosed(active);
+    }
+    if (!await this.attemptModeRollback(active)) {
       active.resolve(result);
+      this.scheduleTargetCleanup(active);
       return result;
-    })();
-    return active.settling;
+    }
+    this.transitionPhase(active, 'closing-target');
+    if (!await this.ensurePhasePersisted(active)) {
+      active.resolve(result);
+      this.scheduleTargetCleanup(active);
+      return result;
+    }
+    const closed = await this.attemptTargetCleanup(active);
+    if (!closed) return this.retainTargetCleanupBarrier(active, result, true);
+    await this.markMainTargetClosed(active);
+    active.resolve(result);
+    return result;
   }
 
   private openTargetOperation(request: SurfaceSwitchRequest): Promise<boolean> {
@@ -762,6 +790,67 @@ export class SurfaceSwitchCoordinator {
     }
   }
 
+  private async attemptSourceCleanup(
+    active: ActiveSwitch,
+  ): Promise<'closed' | 'save-failed' | 'close-failed'> {
+    if (active.sourceCleanup !== undefined) return active.sourceCleanup;
+    active.sourceCleanup = (async () => {
+      try {
+        await this.options.operations.saveDisplayMode(active.transaction.target);
+      } catch {
+        return 'save-failed';
+      }
+      try {
+        const closed = active.transaction.source === 'sidepanel'
+          ? await this.options.operations.closeSidePanel(active.transaction.sourceWindowId)
+          : await this.options.operations.closeFloating();
+        return closed ? 'closed' : 'close-failed';
+      } catch {
+        return 'close-failed';
+      }
+    })();
+    try {
+      return await active.sourceCleanup;
+    } finally {
+      active.sourceCleanup = undefined;
+    }
+  }
+
+  private async attemptModeRollback(active: ActiveSwitch): Promise<boolean> {
+    if (active.modeRollback !== undefined) return active.modeRollback;
+    active.modeRollback = this.options.operations.saveDisplayMode(active.transaction.source)
+      .then(() => true, () => false);
+    try {
+      return await active.modeRollback;
+    } finally {
+      active.modeRollback = undefined;
+    }
+  }
+
+  private transitionPhase(active: ActiveSwitch, phase: SwitchTransaction['phase']): void {
+    active.transaction.phase = phase;
+    active.phasePersistence = undefined;
+    active.phasePersisted = false;
+    active.phasePersistRetriesRemaining = this.targetCloseRetryLimit;
+  }
+
+  private async ensurePhasePersisted(active: ActiveSwitch): Promise<boolean> {
+    if (active.phasePersisted) return true;
+    if (active.phasePersistence !== undefined) return active.phasePersistence;
+    active.phasePersistence = this.persist(active.transaction).then(
+      () => {
+        active.phasePersisted = true;
+        return true;
+      },
+      () => false,
+    );
+    try {
+      return await active.phasePersistence;
+    } finally {
+      active.phasePersistence = undefined;
+    }
+  }
+
   private async retainTargetCleanupBarrier(
     active: ActiveSwitch,
     result: SurfaceSwitchResult = {
@@ -769,14 +858,14 @@ export class SurfaceSwitchCoordinator {
       switchId: active.transaction.switchId,
       reason: 'target-close-failed',
     },
+    phaseAlreadyPersisted = false,
   ): Promise<SurfaceSwitchResult> {
     clearTimeout(active.timeout);
-    active.transaction.phase = 'closing-target';
-    try {
-      await this.persist(active.transaction);
-    } catch {
-      // The in-memory tombstone remains authoritative for this worker lifetime.
+    if (active.transaction.phase !== 'closing-target') {
+      this.transitionPhase(active, 'closing-target');
     }
+    if (phaseAlreadyPersisted) active.phasePersisted = true;
+    await this.ensurePhasePersisted(active);
     active.resolve(result);
     this.scheduleTargetCleanup(active);
     return result;
@@ -789,13 +878,16 @@ export class SurfaceSwitchCoordinator {
       ? active.durableMarkerPersisted
         ? active.durableClearRetriesRemaining
         : active.durableMarkerRetriesRemaining
-      : active.targetCloseRetriesRemaining;
+      : active.phasePersisted
+        ? active.targetCloseRetriesRemaining
+        : active.phasePersistRetriesRemaining;
     if (
       this.active !== active
       || active.targetCleanupTimer !== undefined
       || retriesRemaining <= 0
     ) return;
-    if (!durablePhase) active.targetCloseRetriesRemaining -= 1;
+    if (!durablePhase && active.phasePersisted) active.targetCloseRetriesRemaining -= 1;
+    else if (!durablePhase) active.phasePersistRetriesRemaining -= 1;
     else if (active.durableMarkerPersisted) active.durableClearRetriesRemaining -= 1;
     else active.durableMarkerRetriesRemaining -= 1;
     active.targetCleanupTimer = setTimeout(() => {
@@ -817,6 +909,32 @@ export class SurfaceSwitchCoordinator {
         () => this.scheduleTargetCleanup(active),
         () => this.releaseMainTargetCleanup(active),
       );
+    }
+    if (!await this.ensurePhasePersisted(active)) {
+      this.scheduleTargetCleanup(active);
+      return false;
+    }
+    if (active.transaction.phase === 'closing-source') {
+      const outcome = await this.attemptSourceCleanup(active);
+      if (outcome === 'closed') return this.markMainSourceClosed(active);
+      this.transitionPhase(active, 'rolling-back-mode');
+      if (!await this.ensurePhasePersisted(active)) {
+        this.scheduleTargetCleanup(active);
+        return false;
+      }
+      return this.reconcileTargetCleanup(active);
+    }
+    if (active.transaction.phase === 'rolling-back-mode') {
+      if (!await this.attemptModeRollback(active)) {
+        this.scheduleTargetCleanup(active);
+        return false;
+      }
+      this.transitionPhase(active, 'closing-target');
+      if (!await this.ensurePhasePersisted(active)) {
+        this.scheduleTargetCleanup(active);
+        return false;
+      }
+      return this.reconcileTargetCleanup(active);
     }
     if (active.transaction.phase !== 'closing-target') return true;
     const closed = await this.attemptTargetCleanup(active);

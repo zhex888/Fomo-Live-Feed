@@ -918,7 +918,7 @@ describe('SurfaceSwitchCoordinator', () => {
     expect(operations.closeSidePanel).toHaveBeenCalledOnce();
   });
 
-  it('reports source-close-failed when display-mode rollback also rejects', async () => {
+  it('reports source-close-failed and keeps the target gated when mode rollback rejects', async () => {
     const { coordinator, operations } = createHarness({ closeFloating: false });
     vi.mocked(operations.saveDisplayMode)
       .mockResolvedValueOnce()
@@ -947,7 +947,9 @@ describe('SurfaceSwitchCoordinator', () => {
     expect(operations.saveDisplayMode).toHaveBeenNthCalledWith(1, 'sidepanel');
     expect(operations.saveDisplayMode).toHaveBeenNthCalledWith(2, 'floating');
     expect(operations.closeFloating).toHaveBeenCalledOnce();
-    expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+    expect(operations.closeSidePanel).not.toHaveBeenCalled();
+    await expect(coordinator.request({ ...toFloating, switchId: 'blocked-by-mode-retry' }))
+      .resolves.toMatchObject({ reason: 'switch-in-progress' });
   });
 
   it('retains target cleanup after floating close failure until the side panel closes', async () => {
@@ -2189,6 +2191,212 @@ describe('SurfaceSwitchCoordinator', () => {
     await expect(pending).resolves.toMatchObject({ ok: true });
     expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
     expect(storage.values.get(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY)).toBeNull();
+  });
+
+  it('lets an already-started timeout own settlement when readiness arrives concurrently', async () => {
+    vi.useFakeTimers();
+    try {
+      const targetClose = deferred<boolean>();
+      const { coordinator, operations } = createHarness({ timeoutMs: 10 });
+      vi.mocked(operations.closeSidePanel).mockImplementationOnce(() => targetClose.promise);
+      const pending = coordinator.request({
+        switchId: 'timeout-owns-settlement',
+        source: 'floating',
+        target: 'sidepanel',
+        sourceWindowId: 9,
+      });
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+      await expect(coordinator.bootstrap('sidepanel')).resolves.toMatchObject({
+        phase: 'awaiting-ready',
+      });
+
+      vi.advanceTimersByTime(10);
+      await vi.waitFor(() => expect(operations.closeSidePanel).toHaveBeenCalledOnce());
+      const readiness = coordinator.ready({
+        switchId: 'timeout-owns-settlement',
+        surface: 'sidepanel',
+        eventWatermark: 0,
+      });
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+      expect(operations.closeFloating).not.toHaveBeenCalled();
+
+      targetClose.resolve(true);
+      const expected = {
+        ok: false as const,
+        switchId: 'timeout-owns-settlement',
+        reason: 'target-ready-timeout' as const,
+      };
+      await expect(readiness).resolves.toEqual(expected);
+      await expect(pending).resolves.toEqual(expected);
+      expect(operations.closeFloating).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconciles a restored closing-source after the source-closed marker write failed', async () => {
+    class RejectFirstSourceClosedMarkerStorage extends MemoryStorage {
+      rejected = false;
+
+      override async set(items: Record<string, unknown>): Promise<void> {
+        const transaction = items[SURFACE_SWITCH_STORAGE_KEY] as { phase?: unknown } | undefined;
+        if (transaction?.phase === 'source-closed' && !this.rejected) {
+          this.rejected = true;
+          throw new Error('source-closed marker unavailable');
+        }
+        await super.set(structuredClone(items));
+      }
+    }
+    const storage = new RejectFirstSourceClosedMarkerStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({
+      operations,
+      storage,
+      targetCloseRetryDelayMs: 60_000,
+      targetCloseRetryLimit: 1,
+    });
+    const pending = coordinator.request({
+      switchId: 'restart-closing-source',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
+    await coordinator.ready({
+      switchId: 'restart-closing-source',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    });
+    await expect(pending).resolves.toEqual({ ok: true, switchId: 'restart-closing-source' });
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      phase: 'closing-source',
+    });
+
+    const restarted = new SurfaceSwitchCoordinator({ operations, storage });
+    await restarted.restore();
+    await expect(restarted.request({ ...toFloating, switchId: 'blocked-during-source-reconcile' }))
+      .resolves.toMatchObject({ reason: 'switch-in-progress' });
+    await expect(restarted.bootstrap('sidepanel')).resolves.toBeUndefined();
+    expect(operations.closeFloating).toHaveBeenCalledTimes(2);
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+  });
+
+  it('persists closing-target before rollback close and resumes that phase after marker failure', async () => {
+    class RejectFirstTargetClosedMarkerStorage extends MemoryStorage {
+      rejected = false;
+
+      override async set(items: Record<string, unknown>): Promise<void> {
+        const transaction = items[SURFACE_SWITCH_STORAGE_KEY] as { phase?: unknown } | undefined;
+        if (transaction?.phase === 'target-closed' && !this.rejected) {
+          this.rejected = true;
+          throw new Error('target-closed marker unavailable');
+        }
+        await super.set(structuredClone(items));
+      }
+    }
+    const storage = new RejectFirstTargetClosedMarkerStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => false),
+      closeSidePanel: vi.fn(async () => {
+        expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+          phase: 'closing-target',
+        });
+        return true;
+      }),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({
+      operations,
+      storage,
+      targetCloseRetryDelayMs: 60_000,
+      targetCloseRetryLimit: 1,
+    });
+    const pending = coordinator.request({
+      switchId: 'restart-closing-target',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
+    await coordinator.ready({
+      switchId: 'restart-closing-target',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    });
+    await expect(pending).resolves.toMatchObject({ reason: 'source-close-failed' });
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      phase: 'closing-target',
+    });
+
+    const restarted = new SurfaceSwitchCoordinator({ operations, storage });
+    await restarted.restore();
+    await expect(restarted.bootstrap('sidepanel')).resolves.toBeUndefined();
+    expect(operations.closeSidePanel).toHaveBeenCalledTimes(2);
+    expect(operations.closeFloating).toHaveBeenCalledOnce();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+  });
+
+  it('durably retries display-mode rollback after restart before closing the target', async () => {
+    let displayMode: 'floating' | 'sidepanel' = 'floating';
+    const storage = new MemoryStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => false),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn()
+        .mockImplementationOnce(async () => { displayMode = 'sidepanel'; })
+        .mockRejectedValueOnce(new Error('rollback unavailable'))
+        .mockImplementation(async () => { displayMode = 'floating'; }),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({
+      operations,
+      storage,
+      targetCloseRetryDelayMs: 60_000,
+      targetCloseRetryLimit: 1,
+    });
+    const pending = coordinator.request({
+      switchId: 'restart-mode-rollback',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
+    await coordinator.ready({
+      switchId: 'restart-mode-rollback',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    });
+    await expect(pending).resolves.toMatchObject({ reason: 'source-close-failed' });
+    expect(displayMode).toBe('sidepanel');
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      phase: 'rolling-back-mode',
+    });
+    expect(operations.closeSidePanel).not.toHaveBeenCalled();
+    await expect(coordinator.request({ ...toFloating, switchId: 'blocked-by-mode-rollback' }))
+      .resolves.toMatchObject({ reason: 'switch-in-progress' });
+
+    const restarted = new SurfaceSwitchCoordinator({ operations, storage });
+    await restarted.restore();
+    await expect(restarted.bootstrap('sidepanel')).resolves.toBeUndefined();
+    expect(displayMode).toBe('floating');
+    expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+    expect(operations.closeFloating).toHaveBeenCalledOnce();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
   });
 
   it.each([
