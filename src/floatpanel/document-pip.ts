@@ -101,27 +101,37 @@ export class DocumentPipController {
   private async finishActivation(
     request: Promise<Window>,
   ): Promise<PipActivationResult> {
-    let pipWindow: Window;
     try {
-      pipWindow = await request;
-    } catch (error) {
-      this.reportError('request-rejected', error);
-      this.inFlight = null;
-      return { ok: false, reason: 'request-rejected' };
-    }
+      let pipWindow: Window;
+      try {
+        pipWindow = await request;
+      } catch (error) {
+        this.reportError('request-rejected', error);
+        return { ok: false, reason: 'request-rejected' };
+      }
 
-    try {
-      const root = this.setupDocument(pipWindow.document);
-      await this.options.mount?.(root, pipWindow);
-      this.liveWindow = pipWindow;
-      this.observePageHide(pipWindow);
-      return { ok: true, pipWindow, reused: false };
-    } catch (error) {
-      this.closeSafely(pipWindow);
-      this.reportError('mount-failed', error);
-      return { ok: false, reason: 'mount-failed' };
+      try {
+        this.observePageHide(pipWindow);
+        this.ensureWindowActive(pipWindow);
+        const root = this.setupDocument(pipWindow.document);
+        this.ensureWindowActive(pipWindow);
+        await this.options.mount?.(root, pipWindow);
+        this.ensureWindowActive(pipWindow);
+        this.liveWindow = pipWindow;
+        return { ok: true, pipWindow, reused: false };
+      } catch (error) {
+        this.closeSafely(pipWindow);
+        this.reportError('mount-failed', error);
+        return { ok: false, reason: 'mount-failed' };
+      }
     } finally {
       this.inFlight = null;
+    }
+  }
+
+  private ensureWindowActive(pipWindow: Window): void {
+    if (pipWindow.closed || this.hiddenWindows.has(pipWindow)) {
+      throw new Error('Picture-in-Picture window closed during setup');
     }
   }
 
@@ -190,7 +200,11 @@ export class DocumentPipController {
         if (this.liveWindow === pipWindow) {
           this.liveWindow = null;
         }
-        this.options.onClose?.(pipWindow);
+        try {
+          this.options.onClose?.(pipWindow);
+        } catch {
+          // Consumer callbacks must not interrupt lifecycle cleanup.
+        }
       },
       { once: true },
     );
@@ -208,6 +222,10 @@ export class DocumentPipController {
     reason: Extract<PipActivationResult, { ok: false }>['reason'],
     error: unknown,
   ): void {
-    this.options.onError?.(reason, error);
+    try {
+      this.options.onError?.(reason, error);
+    } catch {
+      // Reporting must not replace the controller's recoverable result.
+    }
   }
 }

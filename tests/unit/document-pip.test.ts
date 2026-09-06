@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DocumentPipController,
   supportsDocumentPip,
+  type DocumentPipControllerOptions,
   type DocumentPictureInPictureLike,
 } from '../../src/floatpanel/document-pip';
 
@@ -285,6 +286,48 @@ describe('DocumentPipController.activate', () => {
     expect(requestWindow).toHaveBeenCalledTimes(2);
   });
 
+  it('treats pagehide during mount as failure and remains retryable', async () => {
+    const firstWindow = createPipWindow();
+    const secondWindow = createPipWindow();
+    let releaseMount: (() => void) | undefined;
+    const mountGate = new Promise<void>((resolve) => {
+      releaseMount = resolve;
+    });
+    const requestWindow = vi
+      .fn<DocumentPictureInPictureLike['requestWindow']>()
+      .mockResolvedValueOnce(firstWindow.pipWindow)
+      .mockResolvedValueOnce(secondWindow.pipWindow);
+    const onClose = vi.fn(() => {
+      throw new Error('consumer close callback failed');
+    });
+    const mount = vi.fn(() =>
+      mount.mock.calls.length === 1 ? mountGate : undefined,
+    );
+    const controller = new DocumentPipController(
+      document,
+      createApi(requestWindow),
+      { width: 400, height: 600, mount, onClose },
+    );
+
+    const firstActivation = controller.activate();
+    await vi.waitFor(() => expect(mount).toHaveBeenCalledTimes(1));
+    firstWindow.dispatchPageHide();
+    firstWindow.dispatchPageHide();
+    releaseMount?.();
+
+    await expect(firstActivation).resolves.toEqual({
+      ok: false,
+      reason: 'mount-failed',
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await expect(controller.activate()).resolves.toEqual({
+      ok: true,
+      pipWindow: secondWindow.pipWindow,
+      reused: false,
+    });
+    expect(requestWindow).toHaveBeenCalledTimes(2);
+  });
+
   it('does not reuse a stale API window after its pagehide event', async () => {
     const firstWindow = createPipWindow();
     const secondWindow = createPipWindow();
@@ -336,6 +379,104 @@ describe('DocumentPipController.activate', () => {
       ok: false,
       reason: 'request-rejected',
     });
+  });
+
+  it('contains onError failure after a synchronous request error and retries', async () => {
+    const { pipWindow } = createPipWindow();
+    const requestWindow = vi
+      .fn<DocumentPictureInPictureLike['requestWindow']>()
+      .mockImplementationOnce(() => {
+        throw new Error('sync request failure');
+      })
+      .mockResolvedValueOnce(pipWindow);
+    const controller = new DocumentPipController(
+      document,
+      createApi(requestWindow),
+      {
+        width: 400,
+        height: 600,
+        onError: () => {
+          throw new Error('consumer error callback failed');
+        },
+      },
+    );
+
+    await expect(controller.activate()).resolves.toEqual({
+      ok: false,
+      reason: 'request-rejected',
+    });
+    await expect(controller.activate()).resolves.toEqual({
+      ok: true,
+      pipWindow,
+      reused: false,
+    });
+  });
+
+  it('contains onError failure after async rejection and clears in-flight', async () => {
+    const { pipWindow } = createPipWindow();
+    const requestWindow = vi
+      .fn<DocumentPictureInPictureLike['requestWindow']>()
+      .mockRejectedValueOnce(new Error('async request failure'))
+      .mockResolvedValueOnce(pipWindow);
+    const controller = new DocumentPipController(
+      document,
+      createApi(requestWindow),
+      {
+        width: 400,
+        height: 600,
+        onError: () => {
+          throw new Error('consumer error callback failed');
+        },
+      },
+    );
+
+    await expect(controller.activate()).resolves.toEqual({
+      ok: false,
+      reason: 'request-rejected',
+    });
+    await expect(controller.activate()).resolves.toEqual({
+      ok: true,
+      pipWindow,
+      reused: false,
+    });
+    expect(requestWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it('contains onError failure after mount failure and clears in-flight', async () => {
+    const firstWindow = createPipWindow();
+    const secondWindow = createPipWindow();
+    const requestWindow = vi
+      .fn<DocumentPictureInPictureLike['requestWindow']>()
+      .mockResolvedValueOnce(firstWindow.pipWindow)
+      .mockResolvedValueOnce(secondWindow.pipWindow);
+    const mount = vi
+      .fn<NonNullable<DocumentPipControllerOptions['mount']>>()
+      .mockRejectedValueOnce(new Error('mount failure'))
+      .mockResolvedValueOnce(undefined);
+    const controller = new DocumentPipController(
+      document,
+      createApi(requestWindow),
+      {
+        width: 400,
+        height: 600,
+        mount,
+        onError: () => {
+          throw new Error('consumer error callback failed');
+        },
+      },
+    );
+
+    await expect(controller.activate()).resolves.toEqual({
+      ok: false,
+      reason: 'mount-failed',
+    });
+    await expect(controller.activate()).resolves.toEqual({
+      ok: true,
+      pipWindow: secondWindow.pipWindow,
+      reused: false,
+    });
+    expect(firstWindow.close).toHaveBeenCalledTimes(1);
+    expect(requestWindow).toHaveBeenCalledTimes(2);
   });
 
   it('closes a partial window and reports mount-failed when setup fails', async () => {
