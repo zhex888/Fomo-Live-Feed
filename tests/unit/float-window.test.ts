@@ -394,12 +394,68 @@ describe('FloatWindowManager.close', () => {
     expect(session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
   });
 
+  it('reports a confirmed removal when session cleanup fails and recovers stale keys on open', async () => {
+    const harness = createHarness();
+    const opened = await harness.manager.openOrFocus(77);
+    if (!opened.ok) throw new Error('expected open');
+    await harness.manager.registerPipOpened(opened.windowId, 'pip-close-cleanup');
+    harness.session.failNextSet();
+
+    await expect(harness.manager.close()).resolves.toBe(true);
+    expect(harness.liveWindows.has(opened.windowId)).toBe(false);
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: opened.windowId,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-close-cleanup',
+        hostWindowId: opened.windowId,
+        phase: 'opened',
+      },
+    });
+
+    const reopened = await harness.manager.openOrFocus(88);
+    expect(reopened).toMatchObject({ ok: true, created: true });
+    if (!reopened.ok) throw new Error('expected reopen');
+    expect(reopened.windowId).not.toBe(opened.windowId);
+    expect(harness.createCalls).toHaveLength(2);
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: reopened.windowId,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 88,
+      [PIP_SESSION_STORAGE_KEY]: -1,
+    });
+  });
+
   it('treats a missing or stale window as already closed', async () => {
     const { manager, session } = createHarness();
     session.seed({ [FLOAT_WINDOW_ID_SESSION_KEY]: 404 });
 
     await expect(manager.close()).resolves.toBe(true);
     expect(session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+  });
+
+  it('reports a get-confirmed missing window even when session cleanup fails', async () => {
+    const { manager, session } = createHarness();
+    session.seed({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: 404,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'stale-pip',
+        hostWindowId: 404,
+        phase: 'ready',
+      },
+    });
+    session.failNextSet();
+
+    await expect(manager.close()).resolves.toBe(true);
+    expect(session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: 404,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'stale-pip',
+        hostWindowId: 404,
+        phase: 'ready',
+      },
+    });
   });
 
   it('waits for an in-flight open to persist its host before closing it', async () => {

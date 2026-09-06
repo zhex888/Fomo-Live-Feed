@@ -575,7 +575,9 @@ export class FloatWindowManager {
       this.pipSessionCache = undefined;
       this.pipSessionCacheConfirmed = false;
     } catch {
-      return false;
+      // The host is already confirmed absent. Session keys are recoverable
+      // bookkeeping: a later open revalidates the stale id with windows.get.
+      return true;
     }
 
     return true;
