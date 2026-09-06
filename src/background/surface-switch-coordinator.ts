@@ -21,7 +21,13 @@ export interface SurfaceReady {
 }
 
 export interface SwitchTransaction extends SurfaceSwitchRequest {
-  phase: 'opening' | 'awaiting-ready' | 'closing-source' | 'closing-target' | 'target-closed';
+  phase:
+    | 'opening'
+    | 'awaiting-ready'
+    | 'closing-source'
+    | 'closing-target'
+    | 'target-closed'
+    | 'source-closed';
   startedAt: number;
 }
 
@@ -131,6 +137,7 @@ export function parseSwitchTransaction(
       'closing-source',
       'closing-target',
       'target-closed',
+      'source-closed',
     ].includes(String(item.phase))
   ) return undefined;
   return item as unknown as SwitchTransaction;
@@ -198,19 +205,21 @@ export class SurfaceSwitchCoordinator {
       && (
         transaction.phase === 'closing-target'
         || transaction.phase === 'target-closed'
+        || transaction.phase === 'source-closed'
         || this.now() - transaction.startedAt < this.timeoutMs
       );
     if (
       (detachedTransaction?.phase === 'closing-target'
-        || detachedTransaction?.phase === 'target-closed')
+        || detachedTransaction?.phase === 'target-closed'
+        || detachedTransaction?.phase === 'source-closed')
       && !mainOwnsDetached
       && this.detachedTargetCleanup === undefined
     ) {
       const cleanup = this.createDetachedTargetCleanup(
         detachedTransaction,
-        detachedTransaction.phase === 'target-closed' ? 'clearing' : 'cleanup',
+        detachedTransaction.phase === 'closing-target' ? 'cleanup' : 'clearing',
         undefined,
-        detachedTransaction.phase === 'target-closed',
+        detachedTransaction.phase !== 'closing-target',
       );
       this.detachedTargetCleanup = cleanup;
       this.scheduleDetachedTargetCleanup(cleanup);
@@ -228,6 +237,7 @@ export class SurfaceSwitchCoordinator {
       || (
         transaction.phase !== 'closing-target'
         && transaction.phase !== 'target-closed'
+        && transaction.phase !== 'source-closed'
         && this.now() - transaction.startedAt >= this.timeoutMs
       )
     ) {
@@ -236,7 +246,11 @@ export class SurfaceSwitchCoordinator {
       this.restoredOwnsDetachedCleanupKey = false;
       return undefined;
     }
-    if (transaction.phase === 'closing-target' || transaction.phase === 'target-closed') {
+    if (
+      transaction.phase === 'closing-target'
+      || transaction.phase === 'target-closed'
+      || transaction.phase === 'source-closed'
+    ) {
       const active = this.createRestoredCleanupBarrier(transaction, mainOwnsDetached);
       this.active = active;
       this.restored = undefined;
@@ -266,7 +280,11 @@ export class SurfaceSwitchCoordinator {
     const transaction = this.active?.transaction ?? this.restored;
     if (
       transaction?.target === surface
-      && (transaction.phase === 'closing-target' || transaction.phase === 'target-closed')
+      && (
+        transaction.phase === 'closing-target'
+        || transaction.phase === 'target-closed'
+        || transaction.phase === 'source-closed'
+      )
     ) {
       if (this.active !== undefined) {
         const closed = await this.reconcileTargetCleanup(this.active);
@@ -466,7 +484,8 @@ export class SurfaceSwitchCoordinator {
       targetCloseRetriesRemaining: this.targetCloseRetryLimit,
       durableMarker: undefined,
       durableClear: undefined,
-      durableMarkerPersisted: transaction.phase === 'target-closed',
+      durableMarkerPersisted:
+        transaction.phase === 'target-closed' || transaction.phase === 'source-closed',
       durableMarkerRetriesRemaining: this.targetCloseRetryLimit,
       durableClearRetriesRemaining: this.targetCloseRetryLimit,
       ownsDetachedCleanupKey,
@@ -484,15 +503,14 @@ export class SurfaceSwitchCoordinator {
       return { ok: false, switchId: ready.switchId, reason: 'stale-switch' };
     }
 
-    if (this.active?.transaction.switchId === ready.switchId) {
-      clearTimeout(this.active.timeout);
-    }
+    const active = this.active ?? this.promoteRestoredTransaction(transaction);
+    clearTimeout(active.timeout);
 
     transaction.phase = 'closing-source';
     try {
       await this.persist(transaction);
     } catch {
-      return this.finish({
+      return this.finishReadyRollback(active, {
         ok: false,
         switchId: ready.switchId,
         reason: 'state-persist-failed',
@@ -502,7 +520,7 @@ export class SurfaceSwitchCoordinator {
     try {
       await this.options.operations.saveDisplayMode(transaction.target);
     } catch {
-      return this.finish({
+      return this.finishReadyRollback(active, {
         ok: false,
         switchId: ready.switchId,
         reason: 'state-persist-failed',
@@ -519,20 +537,62 @@ export class SurfaceSwitchCoordinator {
     }
 
     if (!closed) {
-      try {
-        await this.options.operations.saveDisplayMode(transaction.source);
-      } catch {
-        // The close result remains authoritative: the source is still live,
-        // while display-mode rollback is best effort.
-      }
-      return this.finish({
+      return this.finishReadyRollback(active, {
         ok: false,
         switchId: ready.switchId,
         reason: 'source-close-failed',
       });
     }
 
-    return this.finish({ ok: true, switchId: ready.switchId });
+    return this.finishSourceClosed(active, { ok: true, switchId: ready.switchId });
+  }
+
+  private promoteRestoredTransaction(transaction: SwitchTransaction): ActiveSwitch {
+    const active = this.createRestoredCleanupBarrier(
+      transaction,
+      this.restoredOwnsDetachedCleanupKey,
+    );
+    this.active = active;
+    this.restored = undefined;
+    this.restoredOwnsDetachedCleanupKey = false;
+    return active;
+  }
+
+  private finishReadyRollback(
+    active: ActiveSwitch,
+    result: SurfaceSwitchResult,
+  ): Promise<SurfaceSwitchResult> {
+    if (this.active !== active) return Promise.resolve(result);
+    if (active.settling !== undefined) return active.settling;
+    clearTimeout(active.timeout);
+    active.settling = (async () => {
+      try {
+        await this.options.operations.saveDisplayMode(active.transaction.source);
+      } catch {
+        // Target cleanup still prevents two interactive surfaces when mode rollback fails.
+      }
+      const closed = await this.attemptTargetCleanup(active);
+      if (!closed) return this.retainTargetCleanupBarrier(active, result);
+      await this.markMainTargetClosed(active);
+      active.resolve(result);
+      return result;
+    })();
+    return active.settling;
+  }
+
+  private finishSourceClosed(
+    active: ActiveSwitch,
+    result: SurfaceSwitchResult,
+  ): Promise<SurfaceSwitchResult> {
+    if (this.active !== active) return Promise.resolve(result);
+    if (active.settling !== undefined) return active.settling;
+    clearTimeout(active.timeout);
+    active.settling = (async () => {
+      await this.markMainSourceClosed(active);
+      active.resolve(result);
+      return result;
+    })();
+    return active.settling;
   }
 
   private openTargetOperation(request: SurfaceSwitchRequest): Promise<boolean> {
@@ -704,6 +764,11 @@ export class SurfaceSwitchCoordinator {
 
   private async retainTargetCleanupBarrier(
     active: ActiveSwitch,
+    result: SurfaceSwitchResult = {
+      ok: false,
+      switchId: active.transaction.switchId,
+      reason: 'target-close-failed',
+    },
   ): Promise<SurfaceSwitchResult> {
     clearTimeout(active.timeout);
     active.transaction.phase = 'closing-target';
@@ -712,18 +777,15 @@ export class SurfaceSwitchCoordinator {
     } catch {
       // The in-memory tombstone remains authoritative for this worker lifetime.
     }
-    const result: SurfaceSwitchResult = {
-      ok: false,
-      switchId: active.transaction.switchId,
-      reason: 'target-close-failed',
-    };
     active.resolve(result);
     this.scheduleTargetCleanup(active);
     return result;
   }
 
   private scheduleTargetCleanup(active: ActiveSwitch): void {
-    const retriesRemaining = active.transaction.phase === 'target-closed'
+    const durablePhase = active.transaction.phase === 'target-closed'
+      || active.transaction.phase === 'source-closed';
+    const retriesRemaining = durablePhase
       ? active.durableMarkerPersisted
         ? active.durableClearRetriesRemaining
         : active.durableMarkerRetriesRemaining
@@ -733,7 +795,7 @@ export class SurfaceSwitchCoordinator {
       || active.targetCleanupTimer !== undefined
       || retriesRemaining <= 0
     ) return;
-    if (active.transaction.phase !== 'target-closed') active.targetCloseRetriesRemaining -= 1;
+    if (!durablePhase) active.targetCloseRetriesRemaining -= 1;
     else if (active.durableMarkerPersisted) active.durableClearRetriesRemaining -= 1;
     else active.durableMarkerRetriesRemaining -= 1;
     active.targetCleanupTimer = setTimeout(() => {
@@ -744,10 +806,13 @@ export class SurfaceSwitchCoordinator {
 
   private async reconcileTargetCleanup(active: ActiveSwitch): Promise<boolean> {
     if (this.active !== active) return true;
-    if (active.transaction.phase === 'target-closed') {
+    if (
+      active.transaction.phase === 'target-closed'
+      || active.transaction.phase === 'source-closed'
+    ) {
       return this.reconcileDurableTargetCleanup(
         active,
-        () => this.persistMainTargetClosed(active),
+        () => this.persistMainCompleted(active),
         () => this.clearStored(active),
         () => this.scheduleTargetCleanup(active),
         () => this.releaseMainTargetCleanup(active),
@@ -764,6 +829,12 @@ export class SurfaceSwitchCoordinator {
 
   private markMainTargetClosed(active: ActiveSwitch): Promise<boolean> {
     active.transaction.phase = 'target-closed';
+    active.durableMarkerPersisted = false;
+    return this.reconcileTargetCleanup(active);
+  }
+
+  private markMainSourceClosed(active: ActiveSwitch): Promise<boolean> {
+    active.transaction.phase = 'source-closed';
     active.durableMarkerPersisted = false;
     return this.reconcileTargetCleanup(active);
   }
@@ -936,49 +1007,11 @@ export class SurfaceSwitchCoordinator {
     if (this.detachedTargetCleanup === cleanup) this.detachedTargetCleanup = undefined;
   }
 
-  private async finish(result: SurfaceSwitchResult): Promise<SurfaceSwitchResult> {
-    const active = this.active;
-    const ownsActive = active?.transaction.switchId === result.switchId;
-    const ownsRestored = active === undefined && this.restored?.switchId === result.switchId;
-    if (!ownsActive && !ownsRestored) return result;
-
-    if (ownsActive) {
-      if (active.settling !== undefined) return active.settling;
-      clearTimeout(active.timeout);
-      active.settling = (async () => {
-        try {
-          await this.clearStored(active);
-        } catch {
-          // Transaction cleanup is best effort and cannot change an already
-          // completed surface transition into a contradictory failure.
-        }
-        if (this.active === active) {
-          this.active = undefined;
-          this.restored = undefined;
-          active.resolve(result);
-        }
-        return result;
-      })();
-      return active.settling;
-    }
-
-    try {
-      await this.clearStored(undefined, this.restoredOwnsDetachedCleanupKey);
-    } catch {
-      // A restored transaction has already reached its business result.
-    }
-    if (this.active === undefined && this.restored?.switchId === result.switchId) {
-      this.restored = undefined;
-      this.restoredOwnsDetachedCleanupKey = false;
-    }
-    return result;
-  }
-
   private persist(transaction: SwitchTransaction): Promise<void> {
     return this.options.storage.set({ [SURFACE_SWITCH_STORAGE_KEY]: transaction });
   }
 
-  private persistMainTargetClosed(active: ActiveSwitch): Promise<void> {
+  private persistMainCompleted(active: ActiveSwitch): Promise<void> {
     return this.options.storage.set({
       [SURFACE_SWITCH_STORAGE_KEY]: active.transaction,
       ...(active.ownsDetachedCleanupKey
