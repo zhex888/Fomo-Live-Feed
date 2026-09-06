@@ -40,6 +40,7 @@ export interface PipSessionState {
 
 interface ChromeWindowSnapshot {
   id?: number | undefined;
+  state?: 'normal' | 'minimized' | undefined;
   width?: number | undefined;
   height?: number | undefined;
   left?: number | undefined;
@@ -138,7 +139,12 @@ const parsePipSession = (value: unknown): PipSessionState | undefined => {
 };
 
 type LifecycleStateResult =
-  | { ok: true; hostWindowId: number | undefined; pipSession: PipSessionState | undefined }
+  | {
+    ok: true;
+    hostWindowId: number | undefined;
+    pipSession: PipSessionState | undefined;
+    pipSessionRecord: 'absent' | 'invalid' | 'valid';
+  }
   | { ok: false; reason: 'chrome-api-failed' };
 
 /** Parse a stored geometry record; invalid fields fall back to defaults. */
@@ -400,20 +406,21 @@ export class FloatWindowManager {
   private async recoverStoredPipSessionOnce(): Promise<RecoverStoredPipSessionResult> {
     const state = await this.readLifecycleState();
     if (!state.ok) return state;
-    if (state.pipSession === undefined) {
+    if (state.hostWindowId === undefined) {
+      if (state.pipSession !== undefined) {
+        try {
+          await this.clearPipSession();
+        } catch {
+          return { ok: false, reason: 'chrome-api-failed' };
+        }
+        return { ok: false, reason: 'host-mismatch' };
+      }
       return { ok: true, recovered: false };
     }
-    if (state.hostWindowId !== state.pipSession.hostWindowId) {
-      try {
-        await this.clearPipSession();
-        return { ok: false, reason: 'host-mismatch' };
-      } catch {
-        return { ok: false, reason: 'chrome-api-failed' };
-      }
-    }
 
+    let snapshot: ChromeWindowSnapshot;
     try {
-      await this.chrome.windows.get(state.hostWindowId);
+      snapshot = await this.chrome.windows.get(state.hostWindowId);
     } catch {
       try {
         await this.storage.session.set({
@@ -427,6 +434,12 @@ export class FloatWindowManager {
       }
     }
 
+    const mustNormalize = state.pipSessionRecord !== 'absent'
+      || snapshot.state === 'minimized';
+    if (!mustNormalize) {
+      return { ok: true, recovered: false };
+    }
+
     try {
       await this.chrome.windows.update(state.hostWindowId, {
         state: 'normal',
@@ -436,12 +449,14 @@ export class FloatWindowManager {
       return { ok: false, reason: 'chrome-api-failed' };
     }
 
-    try {
-      await this.clearPipSession();
-      return { ok: true, recovered: true };
-    } catch {
-      return { ok: false, reason: 'chrome-api-failed' };
+    if (state.pipSessionRecord !== 'absent') {
+      try {
+        await this.clearPipSession();
+      } catch {
+        return { ok: false, reason: 'chrome-api-failed' };
+      }
     }
+    return { ok: true, recovered: true };
   }
 
   /** Close the tracked floating window. Missing/stale windows are already closed. */
@@ -634,12 +649,17 @@ export class FloatWindowManager {
         : undefined;
       const rawPipSession = stored[PIP_SESSION_STORAGE_KEY];
       const pipSession = parsePipSession(rawPipSession);
+      const pipSessionRecord = rawPipSession === undefined || rawPipSession === -1
+        ? 'absent'
+        : pipSession === undefined
+          ? 'invalid'
+          : 'valid';
 
-      if (pipSession === undefined && rawPipSession !== undefined && rawPipSession !== -1) {
+      if (pipSessionRecord === 'invalid') {
         await this.clearPipSession();
       }
 
-      return { ok: true, hostWindowId, pipSession };
+      return { ok: true, hostWindowId, pipSession, pipSessionRecord };
     } catch {
       return { ok: false, reason: 'chrome-api-failed' };
     }

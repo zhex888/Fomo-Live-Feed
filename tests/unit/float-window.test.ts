@@ -61,6 +61,7 @@ class InMemoryArea {
 
 interface FakeWindow {
   id: number;
+  state?: 'normal' | 'minimized' | undefined;
   width?: number | undefined;
   height?: number | undefined;
   left?: number | undefined;
@@ -112,6 +113,7 @@ function createHarness(options: {
         }
         const win: FakeWindow = {
           id: nextWindowId++,
+          state: 'normal',
           width: create.width,
           height: create.height,
           left: create.left,
@@ -136,6 +138,10 @@ function createHarness(options: {
         if (updateFailures > 0) {
           updateFailures -= 1;
           throw new Error('update failed');
+        }
+        if ('state' in update) {
+          const win = liveWindows.get(windowId);
+          if (win !== undefined) win.state = update.state;
         }
         if ('focused' in update && update.focused === true && !('state' in update)) {
           focusCalls.push(windowId);
@@ -1018,6 +1024,118 @@ describe('FloatWindowManager PiP session', () => {
       [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
       [PIP_SESSION_STORAGE_KEY]: -1,
     });
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['cleared', -1],
+  ])('clears a missing tracked host when the PiP token is %s', async (_label, token) => {
+    const harness = createHarness();
+    harness.session.seed({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: 42,
+      ...(token === undefined ? {} : { [PIP_SESSION_STORAGE_KEY]: token }),
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'host-missing',
+    });
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+      [PIP_SESSION_STORAGE_KEY]: -1,
+    });
+  });
+
+  it('normalizes a live tracked host when the raw PiP record is invalid', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    harness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: '',
+        hostWindowId,
+        phase: 'ready',
+      },
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(harness.updateCalls.at(-1)).toEqual({
+      windowId: hostWindowId,
+      update: { state: 'normal', focused: true },
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('normalizes the actual tracked host when a valid PiP token names another host', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    harness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-mismatch',
+        hostWindowId: hostWindowId + 1,
+        phase: 'ready',
+      },
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(harness.updateCalls.at(-1)).toEqual({
+      windowId: hostWindowId,
+      update: { state: 'normal', focused: true },
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('normalizes a minimized live host without a PiP token', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    const host = harness.liveWindows.get(hostWindowId);
+    if (host === undefined) throw new Error('expected host');
+    host.state = 'minimized';
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(harness.updateCalls.at(-1)).toEqual({
+      windowId: hostWindowId,
+      update: { state: 'normal', focused: true },
+    });
+  });
+
+  it('does not focus a normal live host without a PiP token on worker wake', async () => {
+    const harness = createHarness();
+    await openHost(harness);
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: false,
+    });
+    expect(harness.updateCalls).toEqual([]);
   });
 
   it('keeps a recovered token retryable until host restoration succeeds', async () => {

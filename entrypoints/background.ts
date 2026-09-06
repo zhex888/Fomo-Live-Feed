@@ -206,7 +206,15 @@ export default defineBackground(() => {
   const floatWindowChrome: FloatWindowChrome = {
     windows: {
       create: async (create) => (await browser.windows.create(create)) ?? {},
-      get: async (windowId) => (await browser.windows.get(windowId)) ?? {},
+      get: async (windowId) => {
+        const window = await browser.windows.get(windowId);
+        return {
+          ...(window.id === undefined ? {} : { id: window.id }),
+          ...(window.state === 'normal' || window.state === 'minimized'
+            ? { state: window.state }
+            : {}),
+        };
+      },
       update: (windowId, update) => browser.windows.update(windowId, update),
       remove: (windowId) => browser.windows.remove(windowId),
     },
