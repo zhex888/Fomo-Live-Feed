@@ -523,8 +523,8 @@ class AttachedTarget {
 
 const attachedSidePanels = new Set<AttachedTarget>();
 const SETTINGS_TOGGLE = '[data-testid="settings-toggle"]';
-const FLOATING_HOST_URL = (): string =>
-  `chrome-extension://${extensionId}/floatpanel.html`;
+const FLOATING_HOST_URL = (id: string | null = extensionId): string =>
+  `chrome-extension://${id}/floatpanel.html`;
 const PIP_ACTIVATION_BUTTON = '.floating-primary-action';
 
 interface PipDomSnapshot {
@@ -535,20 +535,57 @@ interface PipDomSnapshot {
   returnActionCount: number;
 }
 
-const sidePanelTargetCount = async (cdp: CDPSession): Promise<number> => {
+interface SurfaceSwitchObservation {
+  hostReady: boolean;
+  sourceTargetCount: number;
+  phase?: string;
+}
+
+const delayNextSidePanelClose = (runtimeWorker: Worker): Promise<boolean> =>
+  runtimeWorker.evaluate(() => {
+    const sidePanel = (globalThis as unknown as {
+      chrome?: {
+        sidePanel?: {
+          close?(options: { windowId: number }): Promise<void>;
+        };
+      };
+    }).chrome?.sidePanel;
+    const original = sidePanel?.close;
+    if (sidePanel === undefined || typeof original !== 'function') return false;
+    Object.defineProperty(sidePanel, 'close', {
+      configurable: true,
+      value: async (options: { windowId: number }) => {
+        Object.defineProperty(sidePanel, 'close', {
+          configurable: true,
+          value: original,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 750));
+        return original.call(sidePanel, options);
+      },
+    });
+    return true;
+  });
+
+const sidePanelTargetCount = async (
+  cdp: CDPSession,
+  id: string | null = extensionId,
+): Promise<number> => {
   const result = await cdp.send('Target.getTargets') as {
     targetInfos?: Array<{ url?: string }>;
   };
   return (result.targetInfos ?? []).filter(
-    (target) => target.url === `chrome-extension://${extensionId}/sidepanel.html`,
+    (target) => target.url === `chrome-extension://${id}/sidepanel.html`,
   ).length;
 };
 
-async function waitForFloatingHost(): Promise<Page> {
-  if (context === null) throw new Error('extension browser context is unavailable');
+async function waitForFloatingHost(
+  browserContext: BrowserContext | null = context,
+  id: string | null = extensionId,
+): Promise<Page> {
+  if (browserContext === null) throw new Error('extension browser context is unavailable');
   let host: Page | undefined;
   await expect.poll(() => {
-    host = context!.pages().find((page) => page.url() === FLOATING_HOST_URL());
+    host = browserContext.pages().find((page) => page.url() === FLOATING_HOST_URL(id));
     return host !== undefined;
   }, { timeout: 15_000 }).toBe(true);
   if (host === undefined) throw new Error('floating activation host did not open');
@@ -640,19 +677,44 @@ async function switchToFloatingHost(
   panel: AttachedTarget,
   cdp: CDPSession,
   eventId: string,
+  browserContext: BrowserContext | null = context,
+  id: string | null = extensionId,
+  assertReadyBeforeClose: boolean = false,
 ): Promise<Page> {
   await ensureSettingsOpen(panel);
   await panel.clickWithUserGesture(
     '.settings-display-mode-switcher .display-mode-switcher-button:nth-of-type(2)',
   );
-  const host = await waitForFloatingHost();
+  const host = await waitForFloatingHost(browserContext, id);
 
-  // The destination must render the synchronized event before the source is
-  // allowed to disappear. Checking the host first preserves that ordering in
-  // the observable E2E trace rather than merely checking both final states.
-  await expect(host.locator(`[data-event-id="${eventId}"]`)).toHaveCount(1);
+  if (assertReadyBeforeClose) {
+    await expect.poll(async (): Promise<SurfaceSwitchObservation> => {
+      const [hostReady, sourceTargetCount, transaction] = await Promise.all([
+        host.locator(`[data-event-id="${eventId}"]`).count().then((count) => count === 1),
+        sidePanelTargetCount(cdp, id),
+        worker!.evaluate(async () => {
+          const chromeApi = (globalThis as unknown as {
+            chrome: { storage: { session: { get(key: string): Promise<Record<string, unknown>> } } };
+          }).chrome;
+          const stored = await chromeApi.storage.session.get('surfaceSwitch.transaction.v1');
+          return stored['surfaceSwitch.transaction.v1'] as { phase?: string } | undefined;
+        }),
+      ]);
+      return {
+        hostReady,
+        sourceTargetCount,
+        ...(transaction?.phase === undefined ? {} : { phase: transaction.phase }),
+      };
+    }, { timeout: 15_000 }).toMatchObject({
+      hostReady: true,
+      sourceTargetCount: 1,
+      phase: 'closing-source',
+    });
+  } else {
+    await expect(host.locator(`[data-event-id="${eventId}"]`)).toHaveCount(1);
+  }
   await expect(host.locator(PIP_ACTIVATION_BUTTON)).toBeVisible();
-  await expect.poll(() => sidePanelTargetCount(cdp), { timeout: 15_000 }).toBe(0);
+  await expect.poll(() => sidePanelTargetCount(cdp, id), { timeout: 15_000 }).toBe(0);
   await panel.dispose();
   return host;
 }
@@ -681,13 +743,18 @@ const ensureSettingsClosed = (panel: AttachedTarget): Promise<void> =>
 /**
  * Opens the extension's REAL Side Panel and attaches to its extension target.
  */
-async function openSidePanel(cdp: CDPSession, _tabId: number): Promise<AttachedTarget> {
-  if (context === null || extensionId === null) {
+async function openSidePanel(
+  cdp: CDPSession,
+  _tabId: number,
+  browserContext: BrowserContext | null = context,
+  id: string | null = extensionId,
+): Promise<AttachedTarget> {
+  if (browserContext === null || id === null) {
     throw new Error('extension browser context is not available');
   }
 
-  const triggerPage = await context.newPage();
-  await triggerPage.goto(`chrome-extension://${extensionId}/sidepanel.html?e2e-trigger`);
+  const triggerPage = await browserContext.newPage();
+  await triggerPage.goto(`chrome-extension://${id}/sidepanel.html?e2e-trigger`);
   await triggerPage.evaluate(() => {
     const button = document.createElement('button');
     button.id = 'open-real-side-panel';
@@ -711,11 +778,14 @@ async function openSidePanel(cdp: CDPSession, _tabId: number): Promise<AttachedT
   await triggerPage.locator('#open-real-side-panel').click();
 
   await triggerPage.close();
-  return attachSidePanelTarget(cdp);
+  return attachSidePanelTarget(cdp, id);
 }
 
-async function attachSidePanelTarget(cdp: CDPSession): Promise<AttachedTarget> {
-  if (extensionId === null) throw new Error('extension id is unavailable');
+async function attachSidePanelTarget(
+  cdp: CDPSession,
+  id: string | null = extensionId,
+): Promise<AttachedTarget> {
+  if (id === null) throw new Error('extension id is unavailable');
   let targetId: string | null = null;
 
   for (let attempt = 0; attempt < 40 && targetId === null; attempt += 1) {
@@ -727,7 +797,7 @@ async function attachSidePanelTarget(cdp: CDPSession): Promise<AttachedTarget> {
 
     const fresh = (result.targetInfos ?? []).find(
       (info) =>
-        info.url === `chrome-extension://${extensionId}/sidepanel.html` &&
+        info.url === `chrome-extension://${id}/sidepanel.html` &&
         info.targetId !== undefined,
     );
 
@@ -958,7 +1028,15 @@ test.describe('Fomo Live Feed extension', () => {
       await expect.poll(() => panel.hasText('$TOKEN901'), { timeout: 15_000 }).toBe(true);
       await markSocketOpen(fomoPage);
       await expect.poll(() => panel.hasText('Connected'), { timeout: 15_000 }).toBe(true);
-      host = await switchToFloatingHost(panel, cdp, eventId);
+      expect(await delayNextSidePanelClose(worker)).toBe(true);
+      host = await switchToFloatingHost(
+        panel,
+        cdp,
+        eventId,
+        context,
+        extensionId,
+        true,
+      );
       await expect.poll(async () => (await readStoredSettings()).displayMode, {
         timeout: 15_000,
       }).toBe('floating');
@@ -1140,6 +1218,7 @@ test.describe('Fomo Live Feed extension', () => {
           `--proxy-server=127.0.0.1:${server.port}`,
           '--disable-quic',
           '--ignore-certificate-errors',
+          '--enable-unsafe-extension-debugging',
         ],
       });
       let reloadWorker = reloadContext.serviceWorkers()[0];
@@ -1161,28 +1240,138 @@ test.describe('Fomo Live Feed extension', () => {
             hostWindowId: 987_654,
             phase: 'ready',
           },
+          'surfaceSwitch.transaction.v1': {
+            switchId: 'stale-e2e-switch',
+            source: 'sidepanel',
+            target: 'floating',
+            sourceWindowId: 123,
+            phase: 'closing-target',
+            startedAt: Date.now() - 1_000,
+          },
         });
       });
+      const reloadBrowser = reloadContext.browser();
+      if (reloadBrowser === null) throw new Error('isolated Chromium browser is unavailable');
+      const browserCdp = await reloadBrowser.newBrowserCDPSession();
+      const beforeReloadTargets = await browserCdp.send('Target.getTargets') as {
+        targetInfos?: Array<{ targetId?: string; type?: string; url?: string }>;
+      };
+      const backgroundUrl = `chrome-extension://${reloadExtensionId}/background.js`;
+      const oldTargetId = beforeReloadTargets.targetInfos?.find(
+        (target) => target.type === 'service_worker' && target.url === backgroundUrl,
+      )?.targetId;
+      if (oldTargetId === undefined) throw new Error('original worker target is unavailable');
 
-      const extensionsPage = await reloadContext.newPage();
-      await extensionsPage.goto('chrome://extensions');
-      const reloadButton = extensionsPage.locator(
-        `extensions-item#${reloadExtensionId} #dev-reload-button`,
-      );
-      await expect(reloadButton).toBeVisible();
-      await reloadButton.click();
-
-      await expect.poll(async () => {
-        try {
-          await reloadWorker!.evaluate(() => true);
-          return false;
-        } catch {
-          return true;
-        }
+      // Loading the same unpacked directory through Chrome's Extensions CDP
+      // domain is the automation equivalent of the chrome://extensions reload
+      // control. It preserves the extension ID and creates a fresh worker.
+      const loadResult = await browserCdp.send('Extensions.loadUnpacked', {
+        path: EXTENSION_DIR,
+      }) as { id?: string };
+      const replacementExtensionId = loadResult.id ?? reloadExtensionId;
+      expect(replacementExtensionId).toBe(reloadExtensionId);
+      let replacementWorker: Worker | undefined;
+      await expect.poll(() => {
+        replacementWorker = reloadContext!.serviceWorkers().find(
+          (candidate) => candidate !== reloadWorker && candidate.url() === backgroundUrl,
+        );
+        return replacementWorker !== undefined;
       }, { timeout: 15_000 }).toBe(true);
-      expect(reloadContext.pages().filter(
-        (page) => page.url() === `chrome-extension://${reloadExtensionId}/floatpanel.html`,
-      )).toHaveLength(0);
+      if (replacementWorker === undefined) throw new Error('replacement worker is unavailable');
+      const afterReloadTargets = await browserCdp.send('Target.getTargets') as {
+        targetInfos?: Array<{ targetId?: string; type?: string; url?: string }>;
+      };
+      expect(afterReloadTargets.targetInfos?.some((target) => (
+        target.type === 'service_worker'
+        && target.url === backgroundUrl
+        && target.targetId !== oldTargetId
+      ))).toBe(true);
+
+      await expect.poll(() => replacementWorker!.evaluate(async () => {
+        const chromeApi = (globalThis as unknown as {
+          chrome: { storage: { session: { get(keys: string[]): Promise<Record<string, unknown>> } } };
+        }).chrome;
+        const stored = await chromeApi.storage.session.get([
+          'floatWindow.windowId',
+          'floatWindow.pipSession.v1',
+          'surfaceSwitch.transaction.v1',
+        ]);
+        const host = stored['floatWindow.windowId'];
+        const pip = stored['floatWindow.pipSession.v1'];
+        const barrier = stored['surfaceSwitch.transaction.v1'];
+        return (host === undefined || host === -1)
+          && (pip === undefined || pip === -1)
+          && (barrier === undefined || barrier === null);
+      }), { timeout: 15_000 }).toBe(true);
+
+      // Enter through the real Side Panel -> Settings flow after bootstrap.
+      // A fresh host/PiP session must replace the stale token and remain live.
+      const fomoPage = await reloadContext.newPage();
+      await fomoPage.goto(fomoUrl());
+      const reloadFomoTabId = await replacementWorker.evaluate(async () => {
+        const chromeApi = (globalThis as unknown as {
+          chrome: { tabs: { query(options: { url: string }): Promise<Array<{ id?: number }>> } };
+        }).chrome;
+        const tabs = await chromeApi.tabs.query({ url: 'https://fomo.family/*' });
+        if (tabs[0]?.id === undefined) throw new Error('reload Fomo tab is unavailable');
+        return tabs[0].id;
+      });
+      const reloadPageCdp = await reloadContext.newCDPSession(fomoPage);
+      const reopenedPanel = await openSidePanel(
+        reloadPageCdp,
+        reloadFomoTabId,
+        reloadContext,
+        replacementExtensionId,
+      );
+      let freshHost: Page | undefined;
+      try {
+        await ensureSettingsOpen(reopenedPanel);
+        await reopenedPanel.clickWithUserGesture(
+          '.settings-display-mode-switcher .display-mode-switcher-button:nth-of-type(2)',
+        );
+        freshHost = await waitForFloatingHost(reloadContext, replacementExtensionId);
+        await expect(freshHost.locator(PIP_ACTIVATION_BUTTON)).toBeVisible();
+        await expect.poll(
+          () => sidePanelTargetCount(reloadPageCdp, replacementExtensionId),
+          { timeout: 15_000 },
+        ).toBe(0);
+        await reopenedPanel.dispose();
+        const supported = await supportsRealDocumentPip(freshHost);
+        test.skip(!supported, 'This Chromium build does not expose the real Document PiP API');
+        await freshHost.locator(PIP_ACTIVATION_BUTTON).click();
+        await expect.poll(() => readPipDom(freshHost!, 'no-seeded-event'), {
+          timeout: 15_000,
+        }).toMatchObject({ open: true, feedCount: 1 });
+        const freshState = await replacementWorker.evaluate(async () => {
+          const chromeApi = (globalThis as unknown as {
+            chrome: { storage: { session: { get(keys: string[]): Promise<Record<string, unknown>> } } };
+          }).chrome;
+          return chromeApi.storage.session.get([
+            'floatWindow.windowId',
+            'floatWindow.pipSession.v1',
+          ]);
+        });
+        expect(freshState['floatWindow.windowId']).not.toBe(987_654);
+        expect(freshState['floatWindow.pipSession.v1']).toMatchObject({
+          phase: 'ready',
+        });
+        expect((freshState['floatWindow.pipSession.v1'] as { sessionId?: string }).sessionId)
+          .not.toBe('stale-e2e-pip-session');
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        expect(reloadContext.pages().filter(
+          (page) => page.url() === FLOATING_HOST_URL(replacementExtensionId),
+        )).toHaveLength(1);
+        await expect.poll(() => readPipDom(freshHost!, 'no-seeded-event')).toMatchObject({
+          open: true,
+          feedCount: 1,
+        });
+      } finally {
+        await reopenedPanel.dispose();
+        if (freshHost !== undefined) {
+          await closeDocumentPip(freshHost);
+          await freshHost.close().catch(() => {});
+        }
+      }
     } finally {
       await reloadContext?.close();
       rmSync(reloadProfile, { recursive: true, force: true });

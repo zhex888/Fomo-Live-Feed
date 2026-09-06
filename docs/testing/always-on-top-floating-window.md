@@ -80,9 +80,8 @@ surfaces and confirm it persists.
 `tests/e2e/live-feed.spec.ts` drives the real Document PiP API and inspects its
 DOM through `documentPictureInPicture.window`, because Playwright does not list
 Document PiP as a normal `Page`. The extension-reload case runs in an isolated
-profile: Chromium's automation context tears down the unpacked extension worker
-on the `chrome://extensions` reload action without exposing the replacement
-worker, so the test verifies teardown and that no stale host or ordinary popup
-is resurrected. Cold-worker state reconciliation is covered separately by the
-background unit and boundary suites; the complete reopen flow remains in this
-manual matrix.
+profile and reloads the same unpacked directory through Chrome's Extensions CDP
+domain. It verifies a distinct replacement service-worker target, cleared or
+normalized stale host/PiP/switch state, then enters through the real Side Panel
+Settings flow and opens one fresh PiP session. Cold-worker reconciliation is
+also covered by the background unit and boundary suites.
