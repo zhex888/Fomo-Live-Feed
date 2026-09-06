@@ -55,6 +55,7 @@ import { useEventFeed } from '../popup/use-event-feed';
 import { PipelineDiagnostics } from './PipelineDiagnostics';
 import { SupportPanel } from './SupportPanel';
 import { createSurfaceSwitchClient } from './surface-switch-client';
+import { useSurfaceReady } from './use-surface-ready';
 import {
   FILTERABLE_CHAINS,
   toMutedChains,
@@ -629,75 +630,17 @@ export function SidePanelApp(props: SidePanelAppProps) {
   // The coordinator opens a new target surface. It acknowledges the active
   // transaction only after the initial history snapshot and live listener
   // are ready; the source remains visible until this completes.
-  useEffect(() => {
-    if (feed.status !== 'ready') return;
-
-    let disposed = false;
-    let readySwitchId: string | undefined;
-    let bootstrapInFlight = false;
-    let bootstrapPollsRemaining = 50;
-    let bootstrapTimer: ReturnType<typeof setTimeout> | undefined;
-    const scheduleBootstrapPoll = (): void => {
-      if (disposed || readySwitchId !== undefined || bootstrapPollsRemaining <= 0) return;
-      bootstrapPollsRemaining -= 1;
-      clearTimeout(bootstrapTimer);
-      bootstrapTimer = setTimeout(() => void check(), 200);
-    };
-    const check = async (): Promise<void> => {
-      if (disposed || bootstrapInFlight || readySwitchId !== undefined) return;
-      bootstrapInFlight = true;
-      try {
-        const windowId = await (deps.getCurrentWindowId?.() ?? Promise.resolve(0));
-        const bootstrap = await surfaceSwitchClient.bootstrap(surfaceKey, windowId);
-        const transaction = bootstrap.transaction;
-        if (
-          disposed
-          || (transaction !== undefined && transaction.switchId === readySwitchId)
-        ) return;
-        if (transaction === undefined) {
-          return;
-        }
-        if (transaction.phase !== 'awaiting-ready') {
-          scheduleBootstrapPoll();
-          return;
-        }
-        const eventWatermark = feed.events.reduce(
-          (latest, event) => Math.max(latest, event.occurredAt),
-          0,
-        );
-        const result = await surfaceSwitchClient.ready(
-          transaction.switchId,
-          surfaceKey,
-          eventWatermark,
-        );
-        if (result.ok) {
-          readySwitchId = transaction.switchId;
-        } else {
-          scheduleBootstrapPoll();
-        }
-      } catch {
-        scheduleBootstrapPoll();
-      } finally {
-        bootstrapInFlight = false;
-      }
-    };
-
-    const onSwitchMessage = (message: unknown): void => {
-      const parsed = parseExtensionMessage(message);
-      if (
-        parsed.ok
-        && parsed.message.type === 'surface.switch.started'
-        && parsed.message.payload.target === surfaceKey
-      ) void check();
-    };
-    runtime.onMessage.addListener(onSwitchMessage);
-    void check();
-    return () => {
-      disposed = true;
-      clearTimeout(bootstrapTimer);
-      runtime.onMessage.removeListener(onSwitchMessage);
-    };
-  }, [deps.getCurrentWindowId, feed.events, feed.status, runtime, surfaceKey, surfaceSwitchClient]);
+  const eventWatermark = feed.events.reduce(
+    (latest, event) => Math.max(latest, event.occurredAt),
+    0,
+  );
+  useSurfaceReady({
+    enabled: feed.status === 'ready',
+    runtime,
+    getCurrentWindowId: deps.getCurrentWindowId,
+    surface: surfaceKey,
+    eventWatermark,
+  });
 
   const upsertAnnotation = useCallback(
     (traderId: string, update: TraderAnnotationUpdate): void => {

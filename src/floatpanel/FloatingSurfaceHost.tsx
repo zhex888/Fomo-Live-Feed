@@ -4,6 +4,7 @@ import { useLocale } from '../i18n/LocaleProvider';
 import type { PopupRuntimeLike } from '../popup/popup-io';
 import { SidePanelApp, type SidePanelDependencies } from '../sidepanel/SidePanelApp';
 import { createSurfaceSwitchClient } from '../sidepanel/surface-switch-client';
+import { useSurfaceReady } from '../sidepanel/use-surface-ready';
 import {
   DocumentPipController,
   supportsDocumentPip,
@@ -97,6 +98,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   const [state, setState] = useState<FloatingHostState>(
     supported ? 'activation' : 'unsupported',
   );
+  const [childMayBeLive, setChildMayBeLive] = useState(false);
   const sessionRef = useRef<ActiveSession | undefined>(undefined);
   const activationInFlightRef = useRef(false);
   const mountedRef = useRef(true);
@@ -104,6 +106,14 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     () => createSurfaceSwitchClient(deps.runtime),
     [deps.runtime],
   );
+  const unsupportedReady = useSurfaceReady({
+    enabled: state === 'unsupported',
+    runtime: deps.runtime,
+    getCurrentWindowId: deps.getCurrentWindowId,
+    surface: 'floating',
+    eventWatermark: 0,
+    trackAcknowledgement: true,
+  });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -151,6 +161,32 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
 
         const mount = props.mountPipFeed ?? mountPipFeedRoot;
         try {
+          const handleReadyFailure = (): void => {
+            if (sessionRef.current !== session) return;
+            session.readyInFlight = false;
+            session.failureReason = 'mount-failed';
+            if (mountedRef.current) {
+              setChildMayBeLive(true);
+              setState('error');
+            }
+
+            try {
+              pipWindow.close();
+            } catch {
+              return;
+            }
+
+            // Some Window implementations mark `closed` immediately without
+            // dispatching pagehide. Finish the same cleanup here; onClose is
+            // idempotent when pagehide was dispatched synchronously.
+            if (pipWindow.closed) {
+              session.cleanup?.();
+              delete session.cleanup;
+              sendClosed(deps.runtime, session, 'mount-failed');
+              if (mountedRef.current) setChildMayBeLive(false);
+            }
+          };
+
           session.cleanup = mount({
             root,
             deps,
@@ -171,14 +207,9 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
                   return;
                 }
                 session.readyInFlight = false;
-                if (mountedRef.current && sessionRef.current === session) {
-                  setState('error');
-                }
+                handleReadyFailure();
               }).catch(() => {
-                session.readyInFlight = false;
-                if (mountedRef.current && sessionRef.current === session) {
-                  setState('error');
-                }
+                handleReadyFailure();
               });
             },
             onReturnToSidePanel: () => {
@@ -206,6 +237,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
         delete session.cleanup;
         sendClosed(deps.runtime, session, session.failureReason ?? 'native-close');
         if (mountedRef.current) {
+          setChildMayBeLive(false);
           setState(session.failureReason === 'mount-failed' ? 'error' : 'recovery');
         }
       },
@@ -228,6 +260,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
       closedReported: false,
     };
     sessionRef.current = session;
+    setChildMayBeLive(false);
 
     // Keep requestWindow inside the trusted click task. No worker or storage
     // await may run before this call.
@@ -244,7 +277,9 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   }, [controller, props.createSessionId]);
 
   const busy = state === 'opening' || state === 'awaiting-pip-ready';
-  const showFeed = state !== 'unsupported' && state !== 'active';
+  const showFeed = state !== 'unsupported'
+    && state !== 'active'
+    && !(state === 'error' && childMayBeLive);
 
   return (
     <div className="floating-surface-host" data-state={state}>
@@ -254,13 +289,21 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
         <section className="floating-host-card floating-host-card--standalone">
           <h1>{translate('floating.unsupportedTitle')}</h1>
           <p>{translate('floating.unsupportedBody')}</p>
-          <button type="button" onClick={returnToSidePanel}>
+          <button
+            type="button"
+            disabled={!unsupportedReady}
+            onClick={returnToSidePanel}
+          >
             {translate('floating.returnToSidePanel')}
           </button>
         </section>
       ) : state === 'active' ? (
         <div className="floating-lifecycle-shell" role="status" aria-live="polite">
           {translate('floating.active')}
+        </div>
+      ) : state === 'error' && childMayBeLive ? (
+        <div className="floating-lifecycle-shell" role="status" aria-live="polite">
+          {translate('floating.error')}
         </div>
       ) : (
         <section className="floating-host-card" aria-live="polite">

@@ -16,7 +16,10 @@ import {
   FloatingSurfaceHost,
   type MountPipFeed,
 } from '../../src/floatpanel/FloatingSurfaceHost';
-import { mountPipFeedRoot } from '../../src/floatpanel/PipFeedRoot';
+import {
+  mountPipFeedRoot,
+  type PipFeedRootOptions,
+} from '../../src/floatpanel/PipFeedRoot';
 import type { DocumentPictureInPictureLike } from '../../src/floatpanel/document-pip';
 
 // Same locale stub as SidePanelApp.test.tsx: synchronous EN catalog so the
@@ -64,12 +67,16 @@ function createHarness(surface: 'sidepanel' | 'floatpanel' | 'pip') {
   const listeners: Array<(message: unknown) => void> = [];
   const sentMessages: unknown[] = [];
   const storageRecords: Record<string, unknown> = {};
+  const responseOverrides = new Map<string, unknown>();
 
   const deps: SidePanelDependencies = {
     runtime: {
       async sendMessage(message: unknown): Promise<unknown> {
         sentMessages.push(message);
         const type = (message as { type?: string }).type;
+        if (type !== undefined && responseOverrides.has(type)) {
+          return responseOverrides.get(type);
+        }
         if (type === 'connection.query') {
           return CONNECTED;
         }
@@ -130,6 +137,9 @@ function createHarness(surface: 'sidepanel' | 'floatpanel' | 'pip') {
         (message) => (message as { type?: string }).type === 'float.geometryChanged',
       ),
     sentMessages: () => sentMessages,
+    setResponse: (type: string, response: unknown) => {
+      responseOverrides.set(type, response);
+    },
   };
 }
 
@@ -142,10 +152,16 @@ interface PipWindowHarness {
 function createPipWindow(): PipWindowHarness {
   const pipDocument = document.implementation.createHTMLDocument();
   const events = new EventTarget();
+  let closed = false;
   const pipWindow = {
     document: pipDocument,
-    closed: false,
-    close: vi.fn(),
+    get closed() {
+      return closed;
+    },
+    close: vi.fn(() => {
+      closed = true;
+      events.dispatchEvent(new Event('pagehide'));
+    }),
     addEventListener: events.addEventListener.bind(events),
     removeEventListener: events.removeEventListener.bind(events),
   } as unknown as Window;
@@ -242,16 +258,57 @@ describe('FloatingSurfaceHost', () => {
     await screen.findByText('Connected');
   });
 
-  it('shows an honest Chrome 141 requirement and side-panel return without popup fallback', () => {
+  it('shows an honest Chrome 141 requirement and side-panel return without popup fallback', async () => {
     const harness = createHarness('floatpanel');
 
     render(<FloatingSurfaceHost deps={harness.deps} documentPip={null} />);
 
     expect(screen.getByText(/Chrome 141\+/)).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Return to Side Panel' })).toBeEnabled();
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: 'Return to Side Panel' }),
+    ).toBeEnabled());
     expect(screen.queryByRole('button', { name: 'Keep floating window on top' }))
       .toBeNull();
     expect(document.querySelector('.sidepanel-root')).toBeNull();
+  });
+
+  it('acknowledges a pending floating switch before unsupported return can reverse it', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 141;
+    harness.setResponse('surface.bootstrap', {
+      ok: true,
+      transaction: {
+        switchId: 'unsupported-ready',
+        source: 'sidepanel',
+        target: 'floating',
+        sourceWindowId: 17,
+        phase: 'awaiting-ready',
+        startedAt: 1_800_000_000_000,
+      },
+    });
+
+    render(<FloatingSurfaceHost deps={harness.deps} documentPip={null} />);
+
+    await waitFor(() => expect(harness.sentMessages()).toContainEqual({
+      protocolVersion: 1,
+      type: 'surface.ready',
+      payload: {
+        switchId: 'unsupported-ready',
+        surface: 'floating',
+        eventWatermark: 0,
+      },
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Return to Side Panel' }));
+    await waitFor(() => expect(harness.sentMessages()).toContainEqual(
+      expect.objectContaining({
+        type: 'surface.switch.request',
+        payload: expect.objectContaining({
+          source: 'floating',
+          target: 'sidepanel',
+          sourceWindowId: 141,
+        }),
+      }),
+    ));
   });
 
   it('requests PiP once for repeated clicks and exposes a polite busy state', async () => {
@@ -390,6 +447,93 @@ describe('FloatingSurfaceHost', () => {
         reason: 'mount-failed',
       },
     });
+  });
+
+  it.each(['invalid', 'rejected'] as const)(
+    'closes and unmounts a child whose ready response is %s, then requests a fresh child on retry',
+    async (readyFailure) => {
+      const harness = createHarness('floatpanel');
+      harness.deps.getCurrentWindowId = async () => 52;
+      if (readyFailure === 'invalid') {
+        harness.setResponse('pip.ready', { ok: true, minimized: false, extra: true });
+      } else {
+        const sendMessage = harness.deps.runtime.sendMessage;
+        harness.deps.runtime.sendMessage = async (message) => {
+          if ((message as { type?: string }).type === 'pip.ready') {
+            await sendMessage(message);
+            throw new Error('ready rejected');
+          }
+          return sendMessage(message);
+        };
+      }
+      const firstPip = createPipWindow();
+      const secondPip = createPipWindow();
+      const requestWindow = vi
+        .fn<DocumentPictureInPictureLike['requestWindow']>()
+        .mockResolvedValueOnce(firstPip.pipWindow)
+        .mockResolvedValueOnce(secondPip.pipWindow);
+      const cleanups = [vi.fn(), vi.fn()];
+      const mountedFeeds: PipFeedRootOptions[] = [];
+      const mountPipFeed: MountPipFeed = vi.fn((options) => {
+        mountedFeeds.push(options);
+        return cleanups[mountedFeeds.length - 1] ?? vi.fn();
+      });
+
+      render(
+        <FloatingSurfaceHost
+          deps={harness.deps}
+          documentPip={{ window: null, requestWindow }}
+          mountPipFeed={mountPipFeed}
+          createSessionId={() => `ready-failure-${requestWindow.mock.calls.length}`}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+      await waitFor(() => expect(mountPipFeed).toHaveBeenCalledTimes(1));
+
+      act(() => mountedFeeds[0]?.onFeedReady(88));
+
+      expect(await screen.findByRole('button', { name: 'Try again' })).toBeEnabled();
+      expect(firstPip.pipWindow.close).toHaveBeenCalledTimes(1);
+      expect(cleanups[0]).toHaveBeenCalledTimes(1);
+      expect(document.querySelectorAll('.sidepanel-root')).toHaveLength(1);
+
+      harness.setResponse('pip.ready', { ok: true, minimized: false });
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      await waitFor(() => expect(requestWindow).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(mountPipFeed).toHaveBeenCalledTimes(2));
+    },
+  );
+
+  it('keeps the host noninteractive and preserves the child feed when child close fails', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 61;
+    harness.setResponse('pip.ready', { ok: false, reason: 'chrome-api-failed' });
+    const pip = createPipWindow();
+    vi.mocked(pip.pipWindow.close).mockImplementation(() => {
+      throw new Error('close failed');
+    });
+    const cleanup = vi.fn();
+    let mountedFeed: PipFeedRootOptions | undefined;
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={(options) => {
+          mountedFeed = options;
+          return cleanup;
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(mountedFeed).toBeDefined());
+
+    act(() => mountedFeed?.onFeedReady(99));
+
+    await screen.findByText('The always-on-top window could not be opened. You can try again.');
+    expect(document.querySelector('.sidepanel-root')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(cleanup).not.toHaveBeenCalled();
   });
 });
 
