@@ -143,30 +143,9 @@ export class SurfaceSwitchCoordinator {
       clearTimeout(this.active.timeout);
     }
 
+    transaction.phase = 'closing-source';
     try {
-      transaction.phase = 'closing-source';
       await this.persist(transaction);
-      const closed = transaction.source === 'sidepanel'
-        ? await this.options.operations.closeSidePanel(transaction.sourceWindowId)
-        : await this.options.operations.closeFloating();
-      if (!closed) {
-        return this.finish({
-          ok: false,
-          switchId: ready.switchId,
-          reason: 'source-close-failed',
-        });
-      }
-
-      try {
-        await this.options.operations.saveDisplayMode(transaction.target);
-      } catch {
-        return this.finish({
-          ok: false,
-          switchId: ready.switchId,
-          reason: 'state-persist-failed',
-        });
-      }
-      return this.finish({ ok: true, switchId: ready.switchId });
     } catch {
       return this.finish({
         ok: false,
@@ -174,6 +153,41 @@ export class SurfaceSwitchCoordinator {
         reason: 'state-persist-failed',
       });
     }
+
+    try {
+      await this.options.operations.saveDisplayMode(transaction.target);
+    } catch {
+      return this.finish({
+        ok: false,
+        switchId: ready.switchId,
+        reason: 'state-persist-failed',
+      });
+    }
+
+    let closed = false;
+    try {
+      closed = transaction.source === 'sidepanel'
+        ? await this.options.operations.closeSidePanel(transaction.sourceWindowId)
+        : await this.options.operations.closeFloating();
+    } catch {
+      closed = false;
+    }
+
+    if (!closed) {
+      try {
+        await this.options.operations.saveDisplayMode(transaction.source);
+      } catch {
+        // The close result remains authoritative: the source is still live,
+        // while display-mode rollback is best effort.
+      }
+      return this.finish({
+        ok: false,
+        switchId: ready.switchId,
+        reason: 'source-close-failed',
+      });
+    }
+
+    return this.finish({ ok: true, switchId: ready.switchId });
   }
 
   private async openTarget(transaction: SwitchTransaction): Promise<void> {
@@ -219,44 +233,31 @@ export class SurfaceSwitchCoordinator {
       if (active.settling !== undefined) return active.settling;
       clearTimeout(active.timeout);
       active.settling = (async () => {
-        let settledResult = result;
         try {
           await this.clearStored();
         } catch {
-          if (result.ok) {
-            settledResult = {
-              ok: false,
-              switchId: result.switchId,
-              reason: 'state-persist-failed',
-            };
-          }
+          // Transaction cleanup is best effort and cannot change an already
+          // completed surface transition into a contradictory failure.
         }
         if (this.active === active) {
           this.active = undefined;
           this.restored = undefined;
-          active.resolve(settledResult);
+          active.resolve(result);
         }
-        return settledResult;
+        return result;
       })();
       return active.settling;
     }
 
-    let settledResult = result;
     try {
       await this.clearStored();
     } catch {
-      if (result.ok) {
-        settledResult = {
-          ok: false,
-          switchId: result.switchId,
-          reason: 'state-persist-failed',
-        };
-      }
+      // A restored transaction has already reached its business result.
     }
     if (this.active === undefined && this.restored?.switchId === result.switchId) {
       this.restored = undefined;
     }
-    return settledResult;
+    return result;
   }
 
   private persist(transaction: SwitchTransaction): Promise<void> {

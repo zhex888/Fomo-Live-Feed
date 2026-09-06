@@ -93,6 +93,8 @@ describe('SurfaceSwitchCoordinator', () => {
     await coordinator.ready({ switchId: 'switch-2', surface: 'sidepanel', eventWatermark: 4 });
     await expect(pending).resolves.toMatchObject({ ok: true });
     expect(operations.closeFloating).toHaveBeenCalledOnce();
+    expect(vi.mocked(operations.saveDisplayMode).mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(operations.closeFloating).mock.invocationCallOrder[0]!);
   });
 
   it('coalesces duplicate requests and rejects a different active switch', async () => {
@@ -119,6 +121,37 @@ describe('SurfaceSwitchCoordinator', () => {
     expect(operations.closeSidePanel).not.toHaveBeenCalled();
 
     await coordinator.ready({ switchId: 'switch-1', surface: 'floating', eventWatermark: 0 });
+    await pending;
+  });
+
+  it('rejects malformed readiness without closing the floating source', async () => {
+    const { coordinator, operations } = createHarness();
+    const pending = coordinator.request({
+      switchId: 'malformed-ready',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
+
+    await expect(coordinator.ready({
+      switchId: 'malformed-ready',
+      surface: 'invalid',
+      eventWatermark: 0,
+    } as never)).resolves.toEqual({
+      ok: false,
+      switchId: 'malformed-ready',
+      reason: 'stale-switch',
+    });
+    expect(operations.closeFloating).not.toHaveBeenCalled();
+
+    await coordinator.ready({
+      switchId: 'malformed-ready',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    });
     await pending;
   });
 
@@ -365,16 +398,143 @@ describe('SurfaceSwitchCoordinator', () => {
     await retry;
   });
 
-  it('settles with a closed failure when display-mode persistence rejects', async () => {
+  it('keeps the floating source open when target display-mode persistence rejects', async () => {
+    let displayMode: 'floating' | 'sidepanel' = 'floating';
     const { coordinator, operations } = createHarness();
-    vi.mocked(operations.saveDisplayMode).mockRejectedValueOnce(new Error('write failed'));
-    const pending = coordinator.request(toFloating);
-    await vi.waitFor(async () => expect(await coordinator.bootstrap('floating')).toMatchObject({
+    vi.mocked(operations.saveDisplayMode).mockImplementationOnce(async (mode) => {
+      if (mode === 'sidepanel') throw new Error('write failed');
+      displayMode = mode;
+    });
+    const pending = coordinator.request({
+      switchId: 'save-failed-return',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
       phase: 'awaiting-ready',
     }));
-    await coordinator.ready({ switchId: 'switch-1', surface: 'floating', eventWatermark: 0 });
+    await coordinator.ready({
+      switchId: 'save-failed-return',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    });
     await expect(pending).resolves.toEqual({
-      ok: false, switchId: 'switch-1', reason: 'state-persist-failed',
+      ok: false,
+      switchId: 'save-failed-return',
+      reason: 'state-persist-failed',
+    });
+    expect(operations.closeFloating).not.toHaveBeenCalled();
+    expect(displayMode).toBe('floating');
+  });
+
+  it('rolls display mode back to the source when closing the source fails', async () => {
+    let displayMode: 'floating' | 'sidepanel' = 'floating';
+    const { coordinator, operations } = createHarness({ closeFloating: false });
+    vi.mocked(operations.saveDisplayMode).mockImplementation(async (mode) => {
+      displayMode = mode;
+    });
+    const pending = coordinator.request({
+      switchId: 'close-failed-return',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
+
+    await coordinator.ready({
+      switchId: 'close-failed-return',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    });
+
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      switchId: 'close-failed-return',
+      reason: 'source-close-failed',
+    });
+    expect(operations.saveDisplayMode).toHaveBeenNthCalledWith(1, 'sidepanel');
+    expect(operations.saveDisplayMode).toHaveBeenNthCalledWith(2, 'floating');
+    expect(displayMode).toBe('floating');
+    expect(operations.closeFloating).toHaveBeenCalledOnce();
+  });
+
+  it('reports source-close-failed when display-mode rollback also rejects', async () => {
+    const { coordinator, operations } = createHarness({ closeFloating: false });
+    vi.mocked(operations.saveDisplayMode)
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error('rollback failed'));
+    const pending = coordinator.request({
+      switchId: 'rollback-failed-return',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
+
+    await coordinator.ready({
+      switchId: 'rollback-failed-return',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    });
+
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      switchId: 'rollback-failed-return',
+      reason: 'source-close-failed',
+    });
+    expect(operations.saveDisplayMode).toHaveBeenNthCalledWith(1, 'sidepanel');
+    expect(operations.saveDisplayMode).toHaveBeenNthCalledWith(2, 'floating');
+    expect(operations.closeFloating).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a successful close when transaction cleanup rejects', async () => {
+    class RejectingCleanupStorage extends MemoryStorage {
+      override async set(items: Record<string, unknown>): Promise<void> {
+        if (items[SURFACE_SWITCH_STORAGE_KEY] === null) throw new Error('cleanup failed');
+        await super.set(items);
+      }
+    }
+    const storage = new RejectingCleanupStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage });
+    const pending = coordinator.request({
+      switchId: 'successful-close-cleanup-failed',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    const settled = vi.fn();
+    void pending.then(settled);
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
+
+    await expect(coordinator.ready({
+      switchId: 'successful-close-cleanup-failed',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    })).resolves.toEqual({ ok: true, switchId: 'successful-close-cleanup-failed' });
+    await expect(pending).resolves.toEqual({
+      ok: true,
+      switchId: 'successful-close-cleanup-failed',
+    });
+    expect(operations.closeFloating).toHaveBeenCalledOnce();
+    expect(operations.saveDisplayMode).toHaveBeenCalledOnce();
+    expect(settled).toHaveBeenCalledOnce();
+    expect(settled).toHaveBeenCalledWith({
+      ok: true,
+      switchId: 'successful-close-cleanup-failed',
     });
   });
 
