@@ -406,6 +406,7 @@ describe('SurfaceSwitchCoordinator', () => {
       source: 'floating',
       target: 'sidepanel',
       sourceWindowId: 9,
+      targetIdentity: { hostWindowId: 9, instanceToken: 'late-opened-target' },
     });
     const settled = vi.fn();
     void pending.then(settled);
@@ -611,6 +612,7 @@ describe('SurfaceSwitchCoordinator', () => {
       source: 'floating',
       target: 'sidepanel',
       sourceWindowId: 9,
+      targetIdentity: { hostWindowId: 9, instanceToken: 'delayed-persist' },
     });
     await persistStarted.promise;
     await vi.advanceTimersByTimeAsync(10);
@@ -2310,9 +2312,13 @@ describe('SurfaceSwitchCoordinator', () => {
       target: 'sidepanel',
       sourceWindowId: 9,
       sourceIdentity: { hostWindowId: 900, sessionId: 'pip-original' },
+      targetIdentity: { hostWindowId: 9 },
     } satisfies SurfaceSwitchRequest;
     const pending = coordinator.request(request);
-    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel', {
+      hostWindowId: 9,
+      instanceToken: 'restart-target',
+    })).toMatchObject({
       phase: 'awaiting-ready',
     }));
     await coordinator.ready({
@@ -2439,6 +2445,47 @@ describe('SurfaceSwitchCoordinator', () => {
     expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
   });
 
+  it('holds an identityless closing-source record until the target identifies itself', async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(SURFACE_SWITCH_STORAGE_KEY, {
+      switchId: 'legacy-closing-source',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 77,
+      sourceIdentity: { hostWindowId: 900, sessionId: 'old-pip' },
+      phase: 'closing-source',
+      startedAt: 900,
+    });
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage, now: () => 1_000 });
+
+    await expect(coordinator.restore()).resolves.toMatchObject({
+      switchId: 'legacy-closing-source',
+      phase: 'closing-target',
+    });
+    expect(operations.closeFloating).not.toHaveBeenCalled();
+    expect(operations.closeSidePanel).not.toHaveBeenCalled();
+    await expect(coordinator.request({ ...toFloating, switchId: 'blocked-by-legacy' }))
+      .resolves.toMatchObject({ reason: 'switch-in-progress' });
+
+    await expect(coordinator.bootstrap('sidepanel', {
+      hostWindowId: 77,
+      instanceToken: 'current-target',
+    })).resolves.toBeUndefined();
+    expect(operations.closeSidePanel).toHaveBeenCalledWith(77, {
+      hostWindowId: 77,
+      instanceToken: 'current-target',
+    });
+    expect(operations.closeFloating).not.toHaveBeenCalled();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+  });
+
   it('reconciles a restored floating open by its durable target generation', async () => {
     vi.useFakeTimers();
     try {
@@ -2527,8 +2574,12 @@ describe('SurfaceSwitchCoordinator', () => {
       source: 'floating',
       target: 'sidepanel',
       sourceWindowId: 9,
+      targetIdentity: { hostWindowId: 9 },
     });
-    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel', {
+      hostWindowId: 9,
+      instanceToken: 'restart-close-target',
+    })).toMatchObject({
       phase: 'awaiting-ready',
     }));
     await coordinator.ready({
@@ -2543,7 +2594,10 @@ describe('SurfaceSwitchCoordinator', () => {
 
     const restarted = new SurfaceSwitchCoordinator({ operations, storage });
     await restarted.restore();
-    await expect(restarted.bootstrap('sidepanel')).resolves.toBeUndefined();
+    await expect(restarted.bootstrap('sidepanel', {
+      hostWindowId: 9,
+      instanceToken: 'restart-close-target',
+    })).resolves.toBeUndefined();
     expect(operations.closeSidePanel).toHaveBeenCalledTimes(2);
     expect(operations.closeFloating).toHaveBeenCalledOnce();
     expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
@@ -2573,8 +2627,12 @@ describe('SurfaceSwitchCoordinator', () => {
       source: 'floating',
       target: 'sidepanel',
       sourceWindowId: 9,
+      targetIdentity: { hostWindowId: 9 },
     });
-    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel', {
+      hostWindowId: 9,
+      instanceToken: 'rollback-target',
+    })).toMatchObject({
       phase: 'awaiting-ready',
     }));
     await coordinator.ready({

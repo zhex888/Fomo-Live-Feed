@@ -161,6 +161,7 @@ export interface SidePanelDependencies {
 export interface SidePanelAppProps {
   deps: SidePanelDependencies;
   surfaceSwitchClient?: SurfaceSwitchClient;
+  surfaceLifecycleEnabled?: boolean;
   /** Reports the installed initial feed snapshot exactly once per mount. */
   onFeedReady?: (eventWatermark: number) => void;
 }
@@ -645,7 +646,7 @@ export function SidePanelApp(props: SidePanelAppProps) {
     0,
   );
   useSurfaceReady({
-    enabled: feed.status === 'ready',
+    enabled: feed.status === 'ready' && props.surfaceLifecycleEnabled !== false,
     runtime,
     getCurrentWindowId: deps.getCurrentWindowId,
     surface: surfaceKey,

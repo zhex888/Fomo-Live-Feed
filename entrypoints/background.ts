@@ -942,6 +942,14 @@ export default defineBackground(() => {
                 hostWindowId: message.payload.sourceWindowId,
                 instanceToken: message.payload.instanceToken,
               },
+              ...(message.payload.target === 'sidepanel'
+                ? {
+                  targetIdentity: {
+                    hostWindowId: floatWindowManager.cachedOwnerWindowId()
+                      ?? message.payload.sourceWindowId,
+                  },
+                }
+                : {}),
             }).then((result) => {
               broadcastSurfaceSwitchChanged(result);
               return result;
@@ -1001,7 +1009,15 @@ export default defineBackground(() => {
             switchId: message.payload.switchId,
             reason: 'stale-switch' as const,
           };
-          return surfaceSwitchCoordinator.ready(message.payload);
+          return surfaceSwitchCoordinator.ready({
+            switchId: message.payload.switchId,
+            surface: message.payload.surface,
+            eventWatermark: message.payload.eventWatermark,
+            targetIdentity: {
+              hostWindowId: message.payload.windowId,
+              instanceToken: message.payload.instanceToken,
+            },
+          });
         }
         case 'surface.switch.changed':
         case 'surface.switch.started':
@@ -1050,6 +1066,7 @@ export default defineBackground(() => {
             target: 'sidepanel',
             sourceWindowId: ownerWindowId,
             sourceIdentity: { hostWindowId, sessionId },
+            targetIdentity: { hostWindowId: ownerWindowId },
           });
           void result.then(broadcastSurfaceSwitchChanged).catch(() => {});
           return result;

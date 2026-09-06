@@ -570,6 +570,11 @@ describe('worker boundary: real popup clients against the real listener', () => 
       type: 'pip.opened',
       payload: { sessionId: 'pip-live', hostWindowId: host.windowId },
     }, floatHostSender(host.windowId));
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.bootstrap',
+      payload: { surface: 'sidepanel', windowId: 88, instanceToken: 'other-panel' },
+    }, POPUP_SENDER);
 
     queueMicrotask(() => { crossedMicrotask = true; });
     const returned = fake.dispatch({
@@ -590,6 +595,11 @@ describe('worker boundary: real popup clients against the real listener', () => 
     await expect(fake.dispatch({
       protocolVersion: 1,
       type: 'surface.bootstrap',
+      payload: { surface: 'sidepanel', windowId: 88, instanceToken: 'other-panel' },
+    }, POPUP_SENDER)).resolves.toEqual({ ok: true });
+    await expect(fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.bootstrap',
       payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'panel-return' },
     }, POPUP_SENDER)).resolves.toEqual({
       ok: true,
@@ -602,6 +612,19 @@ describe('worker boundary: real popup clients against the real listener', () => 
         },
       }),
     });
+    await expect(fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.ready',
+      payload: {
+        switchId: 'switch-return', surface: 'sidepanel', eventWatermark: 12,
+        windowId: 88, instanceToken: 'other-panel',
+      },
+    }, POPUP_SENDER)).resolves.toEqual({
+      ok: false,
+      switchId: 'switch-return',
+      reason: 'stale-switch',
+    });
+    expect(fake.sessionRecords[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(host.windowId);
     await expect(fake.dispatch({
       protocolVersion: 1,
       type: 'surface.ready',
@@ -658,7 +681,7 @@ describe('worker boundary: real popup clients against the real listener', () => 
     });
 
     await vi.waitFor(() => expect(fake.sessionRecords[SURFACE_SWITCH_STORAGE_KEY]).toMatchObject({
-      phase: 'closing-source',
+      phase: 'closing-target',
     }));
     await expect(fake.dispatch({
       protocolVersion: 1,
@@ -669,7 +692,10 @@ describe('worker boundary: real popup clients against the real listener', () => 
       [FLOAT_WINDOW_ID_SESSION_KEY]: 901,
       [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 88,
       [PIP_SESSION_STORAGE_KEY]: replacementSession,
-      [SURFACE_SWITCH_STORAGE_KEY]: null,
+      [SURFACE_SWITCH_STORAGE_KEY]: expect.objectContaining({
+        switchId: 'old-return-cleanup',
+        phase: 'closing-target',
+      }),
     });
   });
 
@@ -733,6 +759,13 @@ describe('worker boundary: real popup clients against the real listener', () => 
       });
       expect(fake.sidePanelOpenCalls).toEqual([77]);
       expect(fake.sidePanelCloseCalls).toEqual([]);
+      await expect(fake.dispatch({
+        protocolVersion: 1,
+        type: 'surface.bootstrap',
+        payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'late-target' },
+      }, POPUP_SENDER)).resolves.toEqual({ ok: true });
+      expect(fake.sidePanelCloseCalls).toEqual([77]);
+      expect(fake.sessionRecords[SURFACE_SWITCH_STORAGE_KEY]).toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -859,12 +892,14 @@ describe('worker boundary: real popup clients against the real listener', () => 
     await expect(fake.dispatch({
       protocolVersion: 1,
       type: 'surface.bootstrap',
-      payload: { surface: 'floating', windowId: 900, instanceToken: 'float-host' },
+      payload: {
+        surface: 'floating', windowId: 900, instanceToken: 'switch-to-floating',
+      },
     }, POPUP_SENDER)).resolves.toEqual({
       ok: true,
       transaction: expect.objectContaining({
         switchId: 'switch-to-floating',
-        targetIdentity: { hostWindowId: 900, instanceToken: 'float-host' },
+        targetIdentity: { hostWindowId: 900, instanceToken: 'switch-to-floating' },
       }),
     });
     await fake.dispatch({
@@ -872,7 +907,7 @@ describe('worker boundary: real popup clients against the real listener', () => 
       type: 'surface.ready',
       payload: {
         switchId: 'switch-to-floating', surface: 'floating', eventWatermark: 1,
-        windowId: 900, instanceToken: 'float-host',
+        windowId: 900, instanceToken: 'switch-to-floating',
       },
     }, POPUP_SENDER);
     await toFloating;
@@ -952,14 +987,14 @@ describe('worker boundary: real popup clients against the real listener', () => 
     await fake.dispatch({
       protocolVersion: 1,
       type: 'surface.bootstrap',
-      payload: { surface: 'floating', windowId: 900, instanceToken: 'float-cross' },
+      payload: { surface: 'floating', windowId: 900, instanceToken: 'switch-cross-window' },
     }, POPUP_SENDER);
     await fake.dispatch({
       protocolVersion: 1,
       type: 'surface.ready',
       payload: {
         switchId: 'switch-cross-window', surface: 'floating', eventWatermark: 1,
-        windowId: 900, instanceToken: 'float-cross',
+        windowId: 900, instanceToken: 'switch-cross-window',
       },
     }, POPUP_SENDER);
     await toFloating;
@@ -1056,14 +1091,14 @@ describe('worker boundary: real popup clients against the real listener', () => 
     await fake.dispatch({
       protocolVersion: 1,
       type: 'surface.bootstrap',
-      payload: { surface: 'floating', windowId: 900, instanceToken: 'float-cold' },
+      payload: { surface: 'floating', windowId: 900, instanceToken: 'switch-cold-setup' },
     }, POPUP_SENDER);
     await fake.dispatch({
       protocolVersion: 1,
       type: 'surface.ready',
       payload: {
         switchId: 'switch-cold-setup', surface: 'floating', eventWatermark: 1,
-        windowId: 900, instanceToken: 'float-cold',
+        windowId: 900, instanceToken: 'switch-cold-setup',
       },
     }, POPUP_SENDER);
     await toFloating;

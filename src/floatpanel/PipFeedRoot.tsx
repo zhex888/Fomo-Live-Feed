@@ -3,6 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 
 import { LocaleProvider, useLocale } from '../i18n/LocaleProvider';
 import { SidePanelApp, type SidePanelDependencies } from '../sidepanel/SidePanelApp';
+import type { SurfaceSwitchClient } from '../sidepanel/surface-switch-client';
 import { createPanelDependencies } from './create-panel-dependencies';
 import { useSurfaceTheme } from './use-surface-theme';
 
@@ -11,6 +12,7 @@ export interface PipFeedRootOptions {
   deps: SidePanelDependencies;
   onFeedReady(eventWatermark: number): void;
   onReturnToSidePanel(): Promise<boolean>;
+  surfaceSwitchClient?: SurfaceSwitchClient;
 }
 
 function PipFeedContent(props: Omit<PipFeedRootOptions, 'root'> & {
@@ -64,7 +66,14 @@ function PipFeedContent(props: Omit<PipFeedRootOptions, 'root'> & {
           </span>
         )}
       </div>
-      <SidePanelApp deps={props.deps} onFeedReady={props.onFeedReady} />
+      <SidePanelApp
+        deps={props.deps}
+        onFeedReady={props.onFeedReady}
+        {...(props.surfaceSwitchClient === undefined
+          ? {}
+          : { surfaceSwitchClient: props.surfaceSwitchClient })}
+        surfaceLifecycleEnabled={false}
+      />
     </div>
   );
 }
@@ -91,6 +100,9 @@ export function mountPipFeedRoot(options: PipFeedRootOptions): () => void {
       deps={options.deps}
       onFeedReady={options.onFeedReady}
       onReturnToSidePanel={options.onReturnToSidePanel}
+      {...(options.surfaceSwitchClient === undefined
+        ? {}
+        : { surfaceSwitchClient: options.surfaceSwitchClient })}
     />,
   );
 

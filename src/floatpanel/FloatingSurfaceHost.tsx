@@ -140,8 +140,15 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   const activationInFlightRef = useRef(false);
   const mountedRef = useRef(true);
   const surfaceSwitchClient = useMemo(
-    () => createSurfaceSwitchClient(deps.runtime, deps.now),
-    [deps.now, deps.runtime],
+    () => createSurfaceSwitchClient(
+      deps.runtime,
+      deps.now,
+      (props.hostDocument ?? document).location.href.length > 0
+        ? new URL((props.hostDocument ?? document).location.href)
+          .searchParams.get('surfaceInstanceToken') ?? undefined
+        : undefined,
+    ),
+    [deps.now, deps.runtime, props.hostDocument],
   );
   const unsupportedReady = useSurfaceReady({
     enabled: state === 'unsupported',
@@ -304,6 +311,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
             cleanupFeed = mount({
               root,
               deps,
+              surfaceSwitchClient,
               onFeedReady: (eventWatermark) => {
                 if (
                   sessionRef.current !== session

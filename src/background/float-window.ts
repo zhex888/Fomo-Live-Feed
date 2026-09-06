@@ -720,8 +720,12 @@ export class FloatWindowManager {
     const geometry = await this.readGeometry();
 
     try {
+      const floatPanelUrl = new URL(this.chrome.runtime.getURL('floatpanel.html'));
+      if (instanceToken !== undefined) {
+        floatPanelUrl.searchParams.set('surfaceInstanceToken', instanceToken);
+      }
       const created = await this.chrome.windows.create({
-        url: this.chrome.runtime.getURL('floatpanel.html'),
+        url: floatPanelUrl.toString(),
         type: 'popup',
         width: geometry.width,
         height: geometry.height,

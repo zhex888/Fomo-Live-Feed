@@ -1271,6 +1271,9 @@ describe('PipFeedRoot', () => {
     act(() => returnButton?.click());
     expect(onReturnToSidePanel).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(onFeedReady).toHaveBeenCalledWith(0));
+    expect(harness.sentMessages().filter((message) => (
+      (message as { type?: string }).type === 'surface.bootstrap'
+    ))).toHaveLength(0);
 
     act(() => cleanup());
     expect(root.childNodes).toHaveLength(0);

@@ -525,6 +525,14 @@ const attachedSidePanels = new Set<AttachedTarget>();
 const SETTINGS_TOGGLE = '[data-testid="settings-toggle"]';
 const FLOATING_HOST_URL = (id: string | null = extensionId): string =>
   `chrome-extension://${id}/floatpanel.html`;
+const isFloatingHostUrl = (
+  url: string,
+  id: string | null = extensionId,
+): boolean => {
+  const parsed = new URL(url);
+  const expected = new URL(FLOATING_HOST_URL(id));
+  return parsed.origin === expected.origin && parsed.pathname === expected.pathname;
+};
 const PIP_ACTIVATION_BUTTON = '.floating-primary-action';
 
 interface PipDomSnapshot {
@@ -585,7 +593,7 @@ async function waitForFloatingHost(
   if (browserContext === null) throw new Error('extension browser context is unavailable');
   let host: Page | undefined;
   await expect.poll(() => {
-    host = browserContext.pages().find((page) => page.url() === FLOATING_HOST_URL(id));
+    host = browserContext.pages().find((page) => isFloatingHostUrl(page.url(), id));
     return host !== undefined;
   }, { timeout: 15_000 }).toBe(true);
   if (host === undefined) throw new Error('floating activation host did not open');
@@ -1107,7 +1115,7 @@ test.describe('Fomo Live Feed extension', () => {
         feedCount: 1,
         eventCount: 1,
       });
-      expect(context!.pages().filter((page) => page.url() === FLOATING_HOST_URL())).toHaveLength(1);
+      expect(context!.pages().filter((page) => isFloatingHostUrl(page.url()))).toHaveLength(1);
       await expect(host.locator('.popup-feed')).toHaveCount(0);
     } finally {
       await panel.dispose();
@@ -1359,7 +1367,7 @@ test.describe('Fomo Live Feed extension', () => {
           .not.toBe('stale-e2e-pip-session');
         await new Promise((resolve) => setTimeout(resolve, 250));
         expect(reloadContext.pages().filter(
-          (page) => page.url() === FLOATING_HOST_URL(replacementExtensionId),
+          (page) => isFloatingHostUrl(page.url(), replacementExtensionId),
         )).toHaveLength(1);
         await expect.poll(() => readPipDom(freshHost!, 'no-seeded-event')).toMatchObject({
           open: true,

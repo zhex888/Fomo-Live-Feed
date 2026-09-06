@@ -101,8 +101,14 @@ function requireResponse<T>(value: T | undefined, messageType: string): T {
 export function createSurfaceSwitchClient(
   runtime: PopupRuntimeLike,
   now: () => number = Date.now,
+  providedInstanceToken?: string,
 ): SurfaceSwitchClient {
-  const instanceToken = switchId();
+  const instanceToken = providedInstanceToken !== undefined
+    && providedInstanceToken.trim() === providedInstanceToken
+    && providedInstanceToken.length > 0
+    && providedInstanceToken.length <= MAX_SWITCH_ID_LENGTH
+    ? providedInstanceToken
+    : switchId();
   return {
     instanceToken,
     async switchTo(source, target, sourceWindowId) {
