@@ -4,10 +4,7 @@ import { flushSync } from 'react-dom';
 import { useLocale } from '../i18n/LocaleProvider';
 import type { PopupRuntimeLike } from '../popup/popup-io';
 import { SidePanelApp, type SidePanelDependencies } from '../sidepanel/SidePanelApp';
-import {
-  createSurfaceSwitchClient,
-  parseSurfaceSwitchResult,
-} from '../sidepanel/surface-switch-client';
+import { createSurfaceSwitchClient } from '../sidepanel/surface-switch-client';
 import { useSurfaceReady } from '../sidepanel/use-surface-ready';
 import {
   DocumentPipController,
@@ -301,22 +298,21 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
               });
             },
             onReturnToSidePanel: async () => {
-              if (sessionRef.current !== session || session.terminal || pipWindow.closed) {
+              if (
+                sessionRef.current !== session
+                || session.terminal
+                || pipWindow.closed
+                || session.ownerWindowId === undefined
+              ) {
                 return false;
               }
-              const switchId = newId('switch');
               try {
-                const response = await deps.runtime.sendMessage({
-                  protocolVersion: 1,
-                  type: 'pip.returnToSidePanel',
-                  payload: {
-                    sessionId: session.id,
-                    hostWindowId,
-                    ownerWindowId: session.ownerWindowId,
-                    switchId,
-                  },
-                });
-                return parseSurfaceSwitchResult(response, switchId)?.ok === true;
+                const result = await surfaceSwitchClient.returnToSidePanel(
+                  session.id,
+                  hostWindowId,
+                  session.ownerWindowId,
+                );
+                return result.ok;
               } catch {
                 return false;
               }
@@ -345,7 +341,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
         finalizeSession(session, 'mount-failed', 'error');
       },
     },
-  ), [api, deps, props.hostDocument, props.mountPipFeed, translate]);
+  ), [api, deps, props.hostDocument, props.mountPipFeed, surfaceSwitchClient, translate]);
 
   const activate = useCallback((): void => {
     if (activationInFlightRef.current) return;

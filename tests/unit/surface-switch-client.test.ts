@@ -3,6 +3,75 @@ import { describe, expect, it, vi } from 'vitest';
 import { createSurfaceSwitchClient } from '../../src/sidepanel/surface-switch-client';
 
 describe('createSurfaceSwitchClient', () => {
+  it('sends one PiP return request with owner context and returns its typed result', async () => {
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const request = message as { payload: { switchId: string } };
+      return {
+        ok: false,
+        switchId: request.payload.switchId,
+        reason: 'target-ready-timeout',
+      };
+    });
+    const client = createSurfaceSwitchClient({
+      sendMessage,
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    });
+
+    await expect(client.returnToSidePanel('pip-session', 73, 77)).resolves.toMatchObject({
+      ok: false,
+      reason: 'target-ready-timeout',
+    });
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage).toHaveBeenCalledWith({
+      protocolVersion: 1,
+      type: 'pip.returnToSidePanel',
+      payload: {
+        sessionId: 'pip-session',
+        hostWindowId: 73,
+        ownerWindowId: 77,
+        switchId: expect.any(String),
+      },
+    });
+    const switchId = (vi.mocked(sendMessage).mock.calls[0]![0] as {
+      payload: { switchId: string };
+    }).payload.switchId;
+    expect(switchId.length).toBeGreaterThan(0);
+    expect(switchId.length).toBeLessThanOrEqual(128);
+  });
+
+  it.each([
+    ['missing switch id', { ok: true }],
+    ['mismatched switch id', { ok: true, switchId: 'other-switch' }],
+    ['extra success field', { ok: true, switchId: 'dynamic', extra: true }],
+    ['unknown failure reason', { ok: false, switchId: 'dynamic', reason: 'unknown' }],
+  ])('rejects malformed PiP return responses: %s', async (_label, configuredResponse) => {
+    const client = createSurfaceSwitchClient({
+      sendMessage: vi.fn(async (message: unknown) => {
+        const id = (message as { payload: { switchId: string } }).payload.switchId;
+        return {
+          ...configuredResponse,
+          ...('switchId' in configuredResponse && configuredResponse.switchId === 'dynamic'
+            ? { switchId: id }
+            : {}),
+        };
+      }),
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    });
+
+    await expect(client.returnToSidePanel('pip-session', 73, 77))
+      .rejects.toThrow('Invalid pip.returnToSidePanel response');
+  });
+
+  it('propagates a rejected PiP return request', async () => {
+    const client = createSurfaceSwitchClient({
+      sendMessage: vi.fn(async () => Promise.reject(new Error('worker unavailable'))),
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    });
+
+    await expect(client.returnToSidePanel('pip-session', 73, 77))
+      .rejects.toThrow('worker unavailable');
+  });
+
   it('sends typed switch, bootstrap, and ready messages', async () => {
     const sendMessage = vi.fn(async (message: unknown) => {
       const typedMessage = message as { type: string; payload?: { switchId?: string } };

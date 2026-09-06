@@ -26,13 +26,24 @@ export interface SurfaceSwitchClient {
     surface: SurfaceKey,
     eventWatermark: number,
   ): Promise<SurfaceSwitchResult>;
+  returnToSidePanel(
+    sessionId: string,
+    hostWindowId: number,
+    ownerWindowId: number,
+  ): Promise<SurfaceSwitchResult>;
 }
 
+const MAX_SWITCH_ID_LENGTH = 128;
+
 const switchId = (): string => {
+  let candidate: string;
   if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
+    candidate = globalThis.crypto.randomUUID();
+  } else {
+    candidate = `switch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   }
-  return `switch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const bounded = candidate.trim().slice(0, MAX_SWITCH_ID_LENGTH);
+  return bounded.length > 0 ? bounded : `switch-${Date.now()}`;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -117,6 +128,18 @@ export function createSurfaceSwitchClient(
         payload: { switchId: id, surface, eventWatermark },
       });
       return requireResponse(parseSurfaceSwitchResult(response, id), 'surface.ready');
+    },
+    async returnToSidePanel(sessionId, hostWindowId, ownerWindowId) {
+      const id = switchId();
+      const response = await runtime.sendMessage({
+        protocolVersion: 1,
+        type: 'pip.returnToSidePanel',
+        payload: { sessionId, hostWindowId, ownerWindowId, switchId: id },
+      });
+      return requireResponse(
+        parseSurfaceSwitchResult(response, id),
+        'pip.returnToSidePanel',
+      );
     },
   };
 }
