@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 import { LocaleProvider, useLocale } from '../i18n/LocaleProvider';
@@ -8,13 +9,35 @@ export interface PipFeedRootOptions {
   root: HTMLElement;
   deps: SidePanelDependencies;
   onFeedReady(eventWatermark: number): void;
-  onReturnToSidePanel(): void;
+  onReturnToSidePanel(): Promise<boolean>;
 }
 
 function PipFeedContent(props: Omit<PipFeedRootOptions, 'root'> & {
   deps: SidePanelDependencies;
 }) {
   const { translate } = useLocale();
+  const [returnState, setReturnState] = useState<'idle' | 'switching' | 'error'>('idle');
+  const returnInFlightRef = useRef(false);
+
+  const returnToSidePanel = (): void => {
+    if (returnInFlightRef.current) return;
+    returnInFlightRef.current = true;
+    setReturnState('switching');
+    void props.onReturnToSidePanel().then((ok) => {
+      if (ok) return;
+      returnInFlightRef.current = false;
+      setReturnState('error');
+    }).catch(() => {
+      returnInFlightRef.current = false;
+      setReturnState('error');
+    });
+  };
+
+  const returnLabel = returnState === 'switching'
+    ? translate('floating.returning')
+    : returnState === 'error'
+      ? translate('floating.retryReturn')
+      : translate('floating.returnToSidePanel');
 
   return (
     <div className="pip-feed-root">
@@ -23,9 +46,21 @@ function PipFeedContent(props: Omit<PipFeedRootOptions, 'root'> & {
           <span className="pip-lifecycle-dot" aria-hidden="true" />
           {translate('floating.alwaysOnTop')}
         </span>
-        <button type="button" onClick={props.onReturnToSidePanel}>
-          {translate('floating.returnToSidePanel')}
+        <button
+          type="button"
+          disabled={returnState === 'switching'}
+          aria-busy={returnState === 'switching' ? 'true' : undefined}
+          onClick={returnToSidePanel}
+        >
+          {returnLabel}
         </button>
+        {returnState !== 'idle' && (
+          <span role="status" aria-live="polite">
+            {returnState === 'switching'
+              ? translate('floating.returning')
+              : translate('floating.returnFailed')}
+          </span>
+        )}
       </div>
       <SidePanelApp deps={props.deps} onFeedReady={props.onFeedReady} />
     </div>

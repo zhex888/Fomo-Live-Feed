@@ -4,7 +4,10 @@ import { flushSync } from 'react-dom';
 import { useLocale } from '../i18n/LocaleProvider';
 import type { PopupRuntimeLike } from '../popup/popup-io';
 import { SidePanelApp, type SidePanelDependencies } from '../sidepanel/SidePanelApp';
-import { createSurfaceSwitchClient } from '../sidepanel/surface-switch-client';
+import {
+  createSurfaceSwitchClient,
+  parseSurfaceSwitchResult,
+} from '../sidepanel/surface-switch-client';
 import { useSurfaceReady } from '../sidepanel/use-surface-ready';
 import {
   DocumentPipController,
@@ -296,17 +299,26 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
                 handleReadyFailure();
               });
             },
-            onReturnToSidePanel: () => {
-              void deps.runtime.sendMessage({
-                protocolVersion: 1,
-                type: 'pip.returnToSidePanel',
-                payload: {
-                  sessionId: session.id,
-                  hostWindowId,
-                  ownerWindowId: session.ownerWindowId,
-                  switchId: newId('switch'),
-                },
-              }).catch(() => {});
+            onReturnToSidePanel: async () => {
+              if (sessionRef.current !== session || session.terminal || pipWindow.closed) {
+                return false;
+              }
+              const switchId = newId('switch');
+              try {
+                const response = await deps.runtime.sendMessage({
+                  protocolVersion: 1,
+                  type: 'pip.returnToSidePanel',
+                  payload: {
+                    sessionId: session.id,
+                    hostWindowId,
+                    ownerWindowId: session.ownerWindowId,
+                    switchId,
+                  },
+                });
+                return parseSurfaceSwitchResult(response, switchId)?.ok === true;
+              } catch {
+                return false;
+              }
             },
           });
         } catch (error) {

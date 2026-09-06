@@ -276,6 +276,9 @@ export const EN_MESSAGES = {
   'floating.unsupportedTitle': 'Always-on-top window unavailable',
   'floating.unsupportedBody': 'Always-on-top mode requires Chrome 141+ with Document Picture-in-Picture enabled.',
   'floating.returnToSidePanel': 'Return to Side Panel',
+  'floating.returning': 'Returning to Side Panel…',
+  'floating.returnFailed': 'Return failed.',
+  'floating.retryReturn': 'Try returning to Side Panel again',
 
   // Unsupported fallback page
   'unsupported.title': 'Side Panel unavailable',
@@ -542,6 +545,9 @@ export const ZH_MESSAGES: Record<MessageKey, string> = {
   'floating.unsupportedTitle': '始终置顶窗口不可用',
   'floating.unsupportedBody': '始终置顶模式需要 Chrome 141+ 并启用文档画中画功能。',
   'floating.returnToSidePanel': '返回侧边栏',
+  'floating.returning': '正在返回侧边栏…',
+  'floating.returnFailed': '返回失败。',
+  'floating.retryReturn': '重新尝试返回侧边栏',
 
   // Unsupported fallback page
   'unsupported.title': '侧边栏不可用',

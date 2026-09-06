@@ -21,6 +21,14 @@ class MemoryStorage implements SurfaceSwitchStorage {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function createHarness(options: {
   openFloating?: boolean;
   openSidePanel?: boolean;
@@ -129,6 +137,232 @@ describe('SurfaceSwitchCoordinator', () => {
       ok: false, switchId: 'switch-1', reason: 'target-ready-timeout',
     });
     expect(operations.closeSidePanel).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['target-open-failed', { openSidePanel: false, timeoutMs: 1_000 }],
+    ['target-ready-timeout', { openSidePanel: true, timeoutMs: 5 }],
+  ] as const)('keeps the floating source open after %s', async (reason, options) => {
+    const { coordinator, operations } = createHarness(options);
+
+    await expect(coordinator.request({
+      switchId: `return-${reason}`,
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    })).resolves.toEqual({
+      ok: false,
+      switchId: `return-${reason}`,
+      reason,
+    });
+    expect(operations.closeFloating).not.toHaveBeenCalled();
+  });
+
+  it('cancels the ready timeout before closing a source that reported readiness', async () => {
+    vi.useFakeTimers();
+    const closeResult = deferred<boolean>();
+    const { coordinator, operations } = createHarness({ timeoutMs: 50 });
+    vi.mocked(operations.closeFloating).mockImplementationOnce(() => closeResult.promise);
+    const pending = coordinator.request({
+      switchId: 'ready-before-deadline',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    });
+    const ready = coordinator.ready({
+      switchId: 'ready-before-deadline',
+      surface: 'sidepanel',
+      eventWatermark: 4,
+    });
+    const settled = vi.fn();
+    void pending.then(settled);
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(settled).not.toHaveBeenCalled();
+    closeResult.resolve(true);
+
+    await expect(ready).resolves.toEqual({ ok: true, switchId: 'ready-before-deadline' });
+    await expect(pending).resolves.toEqual({ ok: true, switchId: 'ready-before-deadline' });
+    vi.useRealTimers();
+  });
+
+  it('does not expose a failed switch for retry before its stored transaction is cleared', async () => {
+    const clearStarted = deferred<void>();
+    const allowClear = deferred<void>();
+    class DelayedClearStorage extends MemoryStorage {
+      private delayNextClear = true;
+
+      override async set(items: Record<string, unknown>): Promise<void> {
+        if (items[SURFACE_SWITCH_STORAGE_KEY] === null && this.delayNextClear) {
+          this.delayNextClear = false;
+          clearStarted.resolve();
+          await allowClear.promise;
+        }
+        await super.set(items);
+      }
+    }
+    const storage = new DelayedClearStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => false),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage });
+    const first = coordinator.request({
+      switchId: 'failed-before-retry',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await clearStarted.promise;
+    const settled = vi.fn();
+    void first.then(settled);
+    await Promise.resolve();
+
+    expect(settled).not.toHaveBeenCalled();
+    allowClear.resolve();
+    await expect(first).resolves.toEqual({
+      ok: false,
+      switchId: 'failed-before-retry',
+      reason: 'target-open-failed',
+    });
+  });
+
+  it('gives concurrent timeout and late-open failures one settlement path', async () => {
+    vi.useFakeTimers();
+    const openResult = deferred<boolean>();
+    const clearStarted = deferred<void>();
+    const allowClear = deferred<void>();
+    class DelayedClearStorage extends MemoryStorage {
+      private delayNextClear = true;
+
+      override async set(items: Record<string, unknown>): Promise<void> {
+        if (items[SURFACE_SWITCH_STORAGE_KEY] === null && this.delayNextClear) {
+          this.delayNextClear = false;
+          clearStarted.resolve();
+          await allowClear.promise;
+        }
+        await super.set(items);
+      }
+    }
+    const storage = new DelayedClearStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn()
+        .mockImplementationOnce(() => openResult.promise)
+        .mockResolvedValue(true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({
+      operations,
+      storage,
+      timeoutMs: 10,
+    });
+    const first = coordinator.request({
+      switchId: 'timed-out-return',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    await clearStarted.promise;
+    const settled = vi.fn();
+    void first.then(settled);
+
+    openResult.resolve(false);
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    allowClear.resolve();
+    await expect(first).resolves.toEqual({
+      ok: false,
+      switchId: 'timed-out-return',
+      reason: 'target-ready-timeout',
+    });
+    const retry = coordinator.request({
+      switchId: 'retry-after-timeout',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      switchId: 'retry-after-timeout',
+      phase: 'awaiting-ready',
+    });
+    await coordinator.ready({
+      switchId: 'retry-after-timeout',
+      surface: 'sidepanel',
+      eventWatermark: 4,
+    });
+    await retry;
+    vi.useRealTimers();
+  });
+
+  it('settles and unlocks retry when transaction cleanup rejects', async () => {
+    class FailingClearStorage extends MemoryStorage {
+      failClears = true;
+
+      override async set(items: Record<string, unknown>): Promise<void> {
+        if (items[SURFACE_SWITCH_STORAGE_KEY] === null && this.failClears) {
+          throw new Error('clear failed');
+        }
+        await super.set(items);
+      }
+    }
+    const storage = new FailingClearStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => false),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage });
+    const first = coordinator.request({
+      switchId: 'cleanup-rejected',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    const settled = vi.fn();
+    void first.then(settled);
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+
+    expect(settled).toHaveBeenCalledWith({
+      ok: false,
+      switchId: 'cleanup-rejected',
+      reason: 'target-open-failed',
+    });
+
+    storage.failClears = false;
+    vi.mocked(operations.openSidePanel).mockResolvedValueOnce(true);
+    const retry = coordinator.request({
+      switchId: 'retry-after-cleanup-rejection',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      switchId: 'retry-after-cleanup-rejection',
+      phase: 'awaiting-ready',
+    });
+    await coordinator.ready({
+      switchId: 'retry-after-cleanup-rejection',
+      surface: 'sidepanel',
+      eventWatermark: 4,
+    });
+    await retry;
   });
 
   it('settles with a closed failure when display-mode persistence rejects', async () => {

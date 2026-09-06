@@ -53,6 +53,7 @@ interface ActiveSwitch {
   promise: Promise<SurfaceSwitchResult>;
   resolve(result: SurfaceSwitchResult): void;
   timeout: ReturnType<typeof setTimeout>;
+  settling?: Promise<SurfaceSwitchResult>;
 }
 
 function parseTransaction(value: unknown): SwitchTransaction | undefined {
@@ -138,6 +139,10 @@ export class SurfaceSwitchCoordinator {
       return { ok: false, switchId: ready.switchId, reason: 'stale-switch' };
     }
 
+    if (this.active?.transaction.switchId === ready.switchId) {
+      clearTimeout(this.active.timeout);
+    }
+
     try {
       transaction.phase = 'closing-source';
       await this.persist(transaction);
@@ -180,6 +185,10 @@ export class SurfaceSwitchCoordinator {
         : this.options.operations.openSidePanel(transaction.sourceWindowId);
       await this.persist(transaction);
       const opened = await openPromise;
+      if (
+        this.active?.transaction.switchId !== transaction.switchId
+        || this.active.settling !== undefined
+      ) return;
       if (!opened) {
         await this.finish({
           ok: false,
@@ -188,7 +197,6 @@ export class SurfaceSwitchCoordinator {
         });
         return;
       }
-      if (this.active?.transaction.switchId !== transaction.switchId) return;
       transaction.phase = 'awaiting-ready';
       await this.persist(transaction);
       this.options.onAwaitingReady?.({ ...transaction });
@@ -203,14 +211,52 @@ export class SurfaceSwitchCoordinator {
 
   private async finish(result: SurfaceSwitchResult): Promise<SurfaceSwitchResult> {
     const active = this.active;
-    if (active !== undefined && active.transaction.switchId === result.switchId) {
+    const ownsActive = active?.transaction.switchId === result.switchId;
+    const ownsRestored = active === undefined && this.restored?.switchId === result.switchId;
+    if (!ownsActive && !ownsRestored) return result;
+
+    if (ownsActive) {
+      if (active.settling !== undefined) return active.settling;
       clearTimeout(active.timeout);
-      this.active = undefined;
-      active.resolve(result);
+      active.settling = (async () => {
+        let settledResult = result;
+        try {
+          await this.clearStored();
+        } catch {
+          if (result.ok) {
+            settledResult = {
+              ok: false,
+              switchId: result.switchId,
+              reason: 'state-persist-failed',
+            };
+          }
+        }
+        if (this.active === active) {
+          this.active = undefined;
+          this.restored = undefined;
+          active.resolve(settledResult);
+        }
+        return settledResult;
+      })();
+      return active.settling;
     }
-    this.restored = undefined;
-    await this.clearStored();
-    return result;
+
+    let settledResult = result;
+    try {
+      await this.clearStored();
+    } catch {
+      if (result.ok) {
+        settledResult = {
+          ok: false,
+          switchId: result.switchId,
+          reason: 'state-persist-failed',
+        };
+      }
+    }
+    if (this.active === undefined && this.restored?.switchId === result.switchId) {
+      this.restored = undefined;
+    }
+    return settledResult;
   }
 
   private persist(transaction: SwitchTransaction): Promise<void> {

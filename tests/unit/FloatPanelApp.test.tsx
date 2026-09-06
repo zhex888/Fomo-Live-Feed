@@ -439,7 +439,9 @@ describe('FloatingSurfaceHost', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
     await waitFor(() => expect(mountedFeed).toBeDefined());
 
-    act(() => mountedFeed?.onReturnToSidePanel());
+    await act(async () => {
+      await mountedFeed?.onReturnToSidePanel();
+    });
 
     expect(harness.sentMessages()).toContainEqual({
       protocolVersion: 1,
@@ -451,6 +453,55 @@ describe('FloatingSurfaceHost', () => {
         switchId: expect.any(String),
       },
     });
+  });
+
+  it.each([
+    ['target-open-failed', { ok: false, switchId: 'dynamic', reason: 'target-open-failed' }],
+    ['target-ready-timeout', { ok: false, switchId: 'dynamic', reason: 'target-ready-timeout' }],
+    ['missing switch id', { ok: true }],
+    ['mismatched switch id', { ok: true, switchId: 'other-switch' }],
+    ['extra success field', { ok: true, switchId: 'dynamic', extra: true }],
+    ['rejected response', new Error('worker unavailable')],
+  ])('keeps PiP return recoverable after %s', async (_label, configuredResponse) => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 73;
+    const pip = createPipWindow();
+    let mountedFeed: PipFeedRootOptions | undefined;
+    const switchIds: string[] = [];
+    let attempt = 0;
+    harness.setResponse('pip.returnToSidePanel', (message: unknown) => {
+      const id = (message as { payload: { switchId: string } }).payload.switchId;
+      switchIds.push(id);
+      attempt += 1;
+      if (attempt === 2) return { ok: true, switchId: id };
+      if (configuredResponse instanceof Error) return Promise.reject(configuredResponse);
+      return {
+        ...configuredResponse,
+        ...('switchId' in configuredResponse && configuredResponse.switchId === 'dynamic'
+          ? { switchId: id }
+          : {}),
+      };
+    });
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={(options) => {
+          mountedFeed = options;
+          return vi.fn();
+        }}
+        createSessionId={() => 'recoverable-session'}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(mountedFeed).toBeDefined());
+
+    await expect(mountedFeed!.onReturnToSidePanel()).resolves.toBe(false);
+    expect(pip.pipWindow.closed).toBe(false);
+    await expect(mountedFeed!.onReturnToSidePanel()).resolves.toBe(true);
+
+    expect(switchIds).toHaveLength(2);
+    expect(switchIds[1]).not.toBe(switchIds[0]);
   });
 
   it('rejects a pip.opened response with extra owner context fields', async () => {
@@ -894,7 +945,7 @@ describe('PipFeedRoot', () => {
     const root = pip.pipDocument.createElement('div');
     pip.pipDocument.body.append(root);
     const onFeedReady = vi.fn();
-    const onReturnToSidePanel = vi.fn();
+    const onReturnToSidePanel = vi.fn(async () => true);
 
     let cleanup!: () => void;
     await act(async () => {
@@ -917,5 +968,52 @@ describe('PipFeedRoot', () => {
 
     act(() => cleanup());
     expect(root.childNodes).toHaveLength(0);
+  });
+
+  it('shows an atomic returning state, recovers from failure, and allows retry', async () => {
+    const harness = createHarness('pip');
+    const pip = createPipWindow();
+    const root = pip.pipDocument.createElement('div');
+    pip.pipDocument.body.append(root);
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const onReturnToSidePanel = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+
+    let cleanup!: () => void;
+    await act(async () => {
+      cleanup = mountPipFeedRoot({
+        root,
+        deps: harness.deps,
+        onFeedReady: vi.fn(),
+        onReturnToSidePanel,
+      });
+    });
+
+    const returnButton = root.querySelector<HTMLButtonElement>('.pip-lifecycle-bar button')!;
+    act(() => returnButton.click());
+    expect(returnButton.textContent).toBe('Returning to Side Panel…');
+    expect(returnButton.disabled).toBe(true);
+    expect(returnButton.getAttribute('aria-busy')).toBe('true');
+    expect(root.querySelector('[role="status"]')?.textContent)
+      .toBe('Returning to Side Panel…');
+    act(() => returnButton.click());
+    expect(onReturnToSidePanel).toHaveBeenCalledTimes(1);
+
+    await act(async () => first.resolve(false));
+    expect(root.querySelector('[role="status"]')?.textContent).toBe('Return failed.');
+    expect(returnButton.textContent).toBe('Try returning to Side Panel again');
+    expect(returnButton.disabled).toBe(false);
+
+    act(() => returnButton.click());
+    expect(onReturnToSidePanel).toHaveBeenCalledTimes(2);
+    expect(returnButton.textContent).toBe('Returning to Side Panel…');
+    expect(returnButton.disabled).toBe(true);
+    await act(async () => second.resolve(true));
+    expect(returnButton.textContent).toBe('Returning to Side Panel…');
+    expect(returnButton.disabled).toBe(true);
+
+    act(() => cleanup());
   });
 });
