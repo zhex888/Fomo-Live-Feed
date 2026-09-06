@@ -933,7 +933,7 @@ export default defineBackground(() => {
             switchId,
             source: 'floating',
             target: 'sidepanel',
-            sourceWindowId: hostWindowId,
+            sourceWindowId: ownerWindowId,
           });
           void result.then(broadcastSurfaceSwitchChanged).catch(() => {});
           return result;

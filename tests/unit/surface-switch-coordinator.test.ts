@@ -307,12 +307,12 @@ describe('SurfaceSwitchCoordinator', () => {
     });
     for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
     await vi.advanceTimersByTimeAsync(10);
-    await clearStarted.promise;
     const settled = vi.fn();
     void first.then(settled);
+    expect(settled).not.toHaveBeenCalled();
 
     openResult.resolve(false);
-    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    await clearStarted.promise;
     expect(settled).not.toHaveBeenCalled();
 
     allowClear.resolve();
@@ -338,6 +338,156 @@ describe('SurfaceSwitchCoordinator', () => {
       eventWatermark: 4,
     });
     await retry;
+    vi.useRealTimers();
+  });
+
+  it('waits for a late successful target open and closes it before resolving timeout', async () => {
+    vi.useFakeTimers();
+    const openResult = deferred<boolean>();
+    const { coordinator, operations } = createHarness({ timeoutMs: 10 });
+    vi.mocked(operations.openSidePanel).mockImplementationOnce(() => openResult.promise);
+    const pending = coordinator.request({
+      switchId: 'late-opened-target',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    const settled = vi.fn();
+    void pending.then(settled);
+    for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(settled).not.toHaveBeenCalled();
+    openResult.resolve(true);
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+
+    expect(operations.closeSidePanel).toHaveBeenCalledWith(9);
+    expect(operations.closeFloating).not.toHaveBeenCalled();
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      switchId: 'late-opened-target',
+      reason: 'target-ready-timeout',
+    });
+    vi.useRealTimers();
+  });
+
+  it('keeps retry gated until a timed-out transaction persist and target open are reconciled', async () => {
+    vi.useFakeTimers();
+    const persistStarted = deferred<void>();
+    const allowPersist = deferred<void>();
+    class DelayedPersistStorage extends MemoryStorage {
+      private delayOpeningPersist = true;
+
+      override async set(items: Record<string, unknown>): Promise<void> {
+        const transaction = items[SURFACE_SWITCH_STORAGE_KEY] as { phase?: unknown } | undefined;
+        if (this.delayOpeningPersist && transaction?.phase === 'opening') {
+          this.delayOpeningPersist = false;
+          persistStarted.resolve();
+          await allowPersist.promise;
+        }
+        await super.set(items);
+      }
+    }
+    const storage = new DelayedPersistStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage, timeoutMs: 10 });
+    const pending = coordinator.request({
+      switchId: 'delayed-persist',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    await persistStarted.promise;
+    await vi.advanceTimersByTimeAsync(10);
+
+    const earlyRetry = coordinator.request({
+      switchId: 'retry-before-reconcile',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    const earlyRetrySettled = vi.fn();
+    void earlyRetry.then(earlyRetrySettled);
+    for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
+    expect(earlyRetrySettled).toHaveBeenCalledWith({
+      ok: false,
+      switchId: 'retry-before-reconcile',
+      reason: 'switch-in-progress',
+    });
+    allowPersist.resolve();
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      switchId: 'delayed-persist',
+      reason: 'target-ready-timeout',
+    });
+    expect(operations.closeSidePanel).toHaveBeenCalledWith(9);
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+
+    const retry = coordinator.request({
+      switchId: 'retry-after-reconcile',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 9,
+    });
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+      switchId: 'retry-after-reconcile',
+      phase: 'awaiting-ready',
+    });
+    await coordinator.ready({
+      switchId: 'retry-after-reconcile',
+      surface: 'sidepanel',
+      eventWatermark: 0,
+    });
+    await retry;
+    vi.useRealTimers();
+  });
+
+  it('does not deadlock when timeout starts while a failed persist is closing the target', async () => {
+    vi.useFakeTimers();
+    const closeStarted = deferred<void>();
+    const closeResult = deferred<boolean>();
+    class RejectAwaitingReadyStorage extends MemoryStorage {
+      override async set(items: Record<string, unknown>): Promise<void> {
+        const transaction = items[SURFACE_SWITCH_STORAGE_KEY] as { phase?: unknown } | undefined;
+        if (transaction?.phase === 'awaiting-ready') throw new Error('persist failed');
+        await super.set(items);
+      }
+    }
+    const storage = new RejectAwaitingReadyStorage();
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(() => {
+        closeStarted.resolve();
+        return closeResult.promise;
+      }),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage, timeoutMs: 10 });
+    const pending = coordinator.request({
+      switchId: 'timeout-during-reconcile',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 77,
+    });
+    await closeStarted.promise;
+    await vi.advanceTimersByTimeAsync(10);
+    closeResult.resolve(true);
+
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      switchId: 'timeout-during-reconcile',
+      reason: 'target-ready-timeout',
+    });
+    expect(operations.closeSidePanel).toHaveBeenCalledOnce();
     vi.useRealTimers();
   });
 
@@ -552,5 +702,27 @@ describe('SurfaceSwitchCoordinator', () => {
     await expect(coordinator.bootstrap('floating')).resolves.toMatchObject({
       switchId: 'switch-1', target: 'floating',
     });
+  });
+
+  it.each([
+    ['extra key', { extra: true }],
+    ['whitespace switch id', { switchId: ' switch-1' }],
+    ['overlong switch id', { switchId: 'x'.repeat(129) }],
+    ['negative source window', { sourceWindowId: -1 }],
+    ['fractional source window', { sourceWindowId: 1.5 }],
+    ['negative start', { startedAt: -1 }],
+    ['fractional start', { startedAt: 900.5 }],
+    ['future start', { startedAt: 1_001 }],
+  ])('rejects a persisted transaction with %s', async (_label, override) => {
+    const { coordinator, storage } = createHarness();
+    storage.values.set(SURFACE_SWITCH_STORAGE_KEY, {
+      ...toFloating,
+      phase: 'awaiting-ready',
+      startedAt: 900,
+      ...override,
+    });
+
+    await expect(coordinator.restore()).resolves.toBeUndefined();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
   });
 });

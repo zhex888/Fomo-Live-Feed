@@ -11,7 +11,7 @@ const TRANSACTION = {
   target: 'floating',
   sourceWindowId: 7,
   phase: 'awaiting-ready',
-  startedAt: 1_800_000_000_000,
+  startedAt: 1_700_000_000_000,
 } as const;
 
 describe('surface-ready response parsing', () => {

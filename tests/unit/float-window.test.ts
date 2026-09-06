@@ -403,6 +403,16 @@ describe('FloatWindowManager.close', () => {
 
     await expect(harness.manager.close()).resolves.toBe(true);
     expect(harness.liveWindows.has(opened.windowId)).toBe(false);
+    expect(harness.manager.cachedOwnerWindowId()).toBeUndefined();
+    expect(harness.manager.cachedPipSessionMatches(
+      opened.windowId,
+      'pip-close-cleanup',
+    )).toBe(false);
+    expect(harness.manager.cachedPipReturnContextMatches(
+      opened.windowId,
+      'pip-close-cleanup',
+      77,
+    )).toBe(false);
     expect(harness.session.snapshot()).toMatchObject({
       [FLOAT_WINDOW_ID_SESSION_KEY]: opened.windowId,
       [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,

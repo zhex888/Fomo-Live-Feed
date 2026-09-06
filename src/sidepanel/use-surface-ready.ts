@@ -20,13 +20,14 @@ export interface SurfaceReadyOptions {
   surface: SurfaceKey;
   eventWatermark: number;
   trackAcknowledgement?: boolean;
+  now?: () => number;
 }
 
 /** Completes a pending cross-surface transaction once this surface is usable. */
 export function useSurfaceReady(options: SurfaceReadyOptions): boolean {
   const client = useMemo(
-    () => createSurfaceSwitchClient(options.runtime),
-    [options.runtime],
+    () => createSurfaceSwitchClient(options.runtime, options.now),
+    [options.now, options.runtime],
   );
   const [acknowledged, setAcknowledged] = useState(false);
 
@@ -109,6 +110,7 @@ export function useSurfaceReady(options: SurfaceReadyOptions): boolean {
     options.enabled,
     options.eventWatermark,
     options.getCurrentWindowId,
+    options.now,
     options.runtime,
     options.surface,
     options.trackAcknowledgement,

@@ -179,8 +179,8 @@ export function SidePanelApp(props: SidePanelAppProps) {
     [deps.preferences, deps.storage.local],
   );
   const surfaceSwitchClient = useMemo(
-    () => createSurfaceSwitchClient(runtime),
-    [runtime],
+    () => createSurfaceSwitchClient(runtime, now),
+    [now, runtime],
   );
   const [surfaceSwitchState, setSurfaceSwitchState] = useState<
     'idle' | 'switching' | 'error'
@@ -646,6 +646,7 @@ export function SidePanelApp(props: SidePanelAppProps) {
     getCurrentWindowId: deps.getCurrentWindowId,
     surface: surfaceKey,
     eventWatermark,
+    now,
   });
 
   const upsertAnnotation = useCallback(

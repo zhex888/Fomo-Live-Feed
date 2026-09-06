@@ -7,6 +7,7 @@ import type {
   SurfaceSwitchResult,
   SwitchTransaction,
 } from '../background/surface-switch-coordinator';
+import { parseSwitchTransaction } from '../background/surface-switch-coordinator';
 
 export interface SurfaceBootstrapResult {
   ok: true;
@@ -47,43 +48,15 @@ const hasExactKeys = (
     && Object.keys(value).every((key) => allowed.has(key));
 };
 
-const isSurface = (value: unknown): value is SurfaceKey =>
-  value === 'sidepanel' || value === 'floating';
-
-const parseTransaction = (value: unknown): SwitchTransaction | undefined => {
-  if (!isRecord(value) || !hasExactKeys(value, [
-    'switchId',
-    'source',
-    'target',
-    'sourceWindowId',
-    'phase',
-    'startedAt',
-  ])) return undefined;
-  if (
-    typeof value.switchId !== 'string'
-    || value.switchId.trim() !== value.switchId
-    || value.switchId.length === 0
-    || value.switchId.length > 128
-    || !isSurface(value.source)
-    || !isSurface(value.target)
-    || value.source === value.target
-    || !Number.isInteger(value.sourceWindowId)
-    || (value.sourceWindowId as number) < 0
-    || !['opening', 'awaiting-ready', 'closing-source'].includes(String(value.phase))
-    || !Number.isInteger(value.startedAt)
-    || (value.startedAt as number) < 0
-  ) return undefined;
-  return value as unknown as SwitchTransaction;
-};
-
 export function parseSurfaceBootstrapResult(
   value: unknown,
+  now: number = Date.now(),
 ): SurfaceBootstrapResult | undefined {
   if (!isRecord(value) || !hasExactKeys(value, ['ok'], ['transaction']) || value.ok !== true) {
     return undefined;
   }
   if (!Object.hasOwn(value, 'transaction')) return { ok: true };
-  const transaction = parseTransaction(value.transaction);
+  const transaction = parseSwitchTransaction(value.transaction, now);
   return transaction === undefined ? undefined : { ok: true, transaction };
 }
 
@@ -114,6 +87,7 @@ function requireResponse<T>(value: T | undefined, messageType: string): T {
 
 export function createSurfaceSwitchClient(
   runtime: PopupRuntimeLike,
+  now: () => number = Date.now,
 ): SurfaceSwitchClient {
   return {
     async switchTo(source, target, sourceWindowId) {
@@ -134,7 +108,7 @@ export function createSurfaceSwitchClient(
         type: 'surface.bootstrap',
         payload: { surface, windowId },
       });
-      return requireResponse(parseSurfaceBootstrapResult(response), 'surface.bootstrap');
+      return requireResponse(parseSurfaceBootstrapResult(response, now()), 'surface.bootstrap');
     },
     async ready(id, surface, eventWatermark) {
       const response = await runtime.sendMessage({

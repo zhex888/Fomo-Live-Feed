@@ -565,15 +565,16 @@ export class FloatWindowManager {
       }
     }
 
+    this.ownerWindowIdCache = undefined;
+    this.pipSessionCache = undefined;
+    this.pipSessionCacheConfirmed = false;
+
     try {
       await this.storage.session.set({
         [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
         [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: -1,
         [PIP_SESSION_STORAGE_KEY]: -1,
       });
-      this.ownerWindowIdCache = undefined;
-      this.pipSessionCache = undefined;
-      this.pipSessionCacheConfirmed = false;
     } catch {
       // The host is already confirmed absent. Session keys are recoverable
       // bookkeeping: a later open revalidates the stale id with windows.get.

@@ -133,8 +133,8 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   const activationInFlightRef = useRef(false);
   const mountedRef = useRef(true);
   const surfaceSwitchClient = useMemo(
-    () => createSurfaceSwitchClient(deps.runtime),
-    [deps.runtime],
+    () => createSurfaceSwitchClient(deps.runtime, deps.now),
+    [deps.now, deps.runtime],
   );
   const unsupportedReady = useSurfaceReady({
     enabled: state === 'unsupported',
@@ -143,6 +143,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     surface: 'floating',
     eventWatermark: 0,
     trackAcknowledgement: true,
+    now: deps.now,
   });
   const finalizeSession = (
     session: ActiveSession,

@@ -81,4 +81,34 @@ describe('createSurfaceSwitchClient', () => {
     await expect(client.bootstrap('floating', 8))
       .rejects.toThrow('Invalid surface.bootstrap response');
   });
+
+  it.each([
+    ['extra key', { extra: true }],
+    ['whitespace switch id', { switchId: ' switch-1' }],
+    ['overlong switch id', { switchId: 'x'.repeat(129) }],
+    ['negative source window', { sourceWindowId: -1 }],
+    ['fractional source window', { sourceWindowId: 1.5 }],
+    ['negative start', { startedAt: -1 }],
+    ['fractional start', { startedAt: 900.5 }],
+    ['future start', { startedAt: 1_001 }],
+  ])('rejects a bootstrap transaction with %s', async (_label, override) => {
+    const client = createSurfaceSwitchClient({
+      sendMessage: vi.fn(async () => ({
+        ok: true,
+        transaction: {
+          switchId: 'switch-1',
+          source: 'sidepanel',
+          target: 'floating',
+          sourceWindowId: 7,
+          phase: 'awaiting-ready',
+          startedAt: 900,
+          ...override,
+        },
+      })),
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    }, () => 1_000);
+
+    await expect(client.bootstrap('floating', 8))
+      .rejects.toThrow('Invalid surface.bootstrap response');
+  });
 });

@@ -577,6 +577,17 @@ describe('worker boundary: real popup clients against the real listener', () => 
     }));
     await expect(fake.dispatch({
       protocolVersion: 1,
+      type: 'surface.bootstrap',
+      payload: { surface: 'sidepanel', windowId: 77 },
+    }, POPUP_SENDER)).resolves.toEqual({
+      ok: true,
+      transaction: expect.objectContaining({
+        switchId: 'switch-return',
+        sourceWindowId: 77,
+      }),
+    });
+    await expect(fake.dispatch({
+      protocolVersion: 1,
       type: 'surface.ready',
       payload: { switchId: 'switch-return', surface: 'sidepanel', eventWatermark: 12 },
     }, POPUP_SENDER)).resolves.toEqual({ ok: true, switchId: 'switch-return' });

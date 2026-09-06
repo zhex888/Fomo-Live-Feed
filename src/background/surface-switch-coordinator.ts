@@ -53,19 +53,40 @@ interface ActiveSwitch {
   promise: Promise<SurfaceSwitchResult>;
   resolve(result: SurfaceSwitchResult): void;
   timeout: ReturnType<typeof setTimeout>;
+  opening?: Promise<boolean>;
   settling?: Promise<SurfaceSwitchResult>;
 }
 
-function parseTransaction(value: unknown): SwitchTransaction | undefined {
+const TRANSACTION_KEYS = [
+  'switchId',
+  'source',
+  'target',
+  'sourceWindowId',
+  'phase',
+  'startedAt',
+] as const;
+
+export function parseSwitchTransaction(
+  value: unknown,
+  now: number,
+): SwitchTransaction | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const item = value as Record<string, unknown>;
   if (
-    typeof item.switchId !== 'string' || item.switchId.length === 0
+    Object.keys(item).length !== TRANSACTION_KEYS.length
+    || !TRANSACTION_KEYS.every((key) => Object.hasOwn(item, key))
+    || typeof item.switchId !== 'string'
+    || item.switchId.trim() !== item.switchId
+    || item.switchId.length === 0
+    || item.switchId.length > 128
     || (item.source !== 'sidepanel' && item.source !== 'floating')
     || (item.target !== 'sidepanel' && item.target !== 'floating')
     || item.source === item.target
-    || typeof item.sourceWindowId !== 'number' || !Number.isInteger(item.sourceWindowId)
-    || typeof item.startedAt !== 'number' || !Number.isFinite(item.startedAt)
+    || !Number.isInteger(item.sourceWindowId)
+    || (item.sourceWindowId as number) < 0
+    || !Number.isInteger(item.startedAt)
+    || (item.startedAt as number) < 0
+    || (item.startedAt as number) > now
     || !['opening', 'awaiting-ready', 'closing-source'].includes(String(item.phase))
   ) return undefined;
   return item as unknown as SwitchTransaction;
@@ -84,7 +105,10 @@ export class SurfaceSwitchCoordinator {
 
   async restore(): Promise<SwitchTransaction | undefined> {
     const stored = await this.options.storage.get([SURFACE_SWITCH_STORAGE_KEY]);
-    const transaction = parseTransaction(stored[SURFACE_SWITCH_STORAGE_KEY]);
+    const transaction = parseSwitchTransaction(
+      stored[SURFACE_SWITCH_STORAGE_KEY],
+      this.now(),
+    );
     if (transaction === undefined || this.now() - transaction.startedAt >= this.timeoutMs) {
       await this.clearStored();
       this.restored = undefined;
@@ -116,15 +140,17 @@ export class SurfaceSwitchCoordinator {
       phase: 'opening',
       startedAt: this.now(),
     };
+    let active!: ActiveSwitch;
     const timeout = setTimeout(() => {
-      void this.finish({
+      void this.finishTimedOut(active, {
         ok: false,
         switchId: request.switchId,
         reason: 'target-ready-timeout',
       });
     }, this.timeoutMs);
-    this.active = { transaction, promise, resolve, timeout };
-    void this.openTarget(transaction);
+    active = { transaction, promise, resolve, timeout };
+    this.active = active;
+    active.opening = this.openTarget(active);
     return promise;
   }
 
@@ -190,37 +216,117 @@ export class SurfaceSwitchCoordinator {
     return this.finish({ ok: true, switchId: ready.switchId });
   }
 
-  private async openTarget(transaction: SwitchTransaction): Promise<void> {
+  private async openTarget(active: ActiveSwitch): Promise<boolean> {
+    const transaction = active.transaction;
+    let opened = false;
     try {
       // Invoke the Chrome surface API before the first await so a side-panel
       // open remains inside the originating user-activation task.
       const openPromise = transaction.target === 'floating'
         ? this.options.operations.openFloating(transaction.sourceWindowId)
         : this.options.operations.openSidePanel(transaction.sourceWindowId);
-      await this.persist(transaction);
-      const opened = await openPromise;
+      try {
+        await this.persist(transaction);
+      } catch {
+        try {
+          opened = await openPromise;
+        } catch {
+          opened = false;
+        }
+        if (active.settling !== undefined) return opened;
+        if (opened) {
+          const closed = await this.closeTarget(transaction);
+          if (active.settling !== undefined) return !closed;
+        }
+        await this.finish({
+          ok: false,
+          switchId: transaction.switchId,
+          reason: 'target-open-failed',
+        });
+        return false;
+      }
+      try {
+        opened = await openPromise;
+      } catch {
+        opened = false;
+      }
       if (
-        this.active?.transaction.switchId !== transaction.switchId
-        || this.active.settling !== undefined
-      ) return;
+        this.active !== active
+        || active.settling !== undefined
+      ) return opened;
       if (!opened) {
         await this.finish({
           ok: false,
           switchId: transaction.switchId,
           reason: 'target-open-failed',
         });
-        return;
+        return false;
       }
       transaction.phase = 'awaiting-ready';
-      await this.persist(transaction);
+      try {
+        await this.persist(transaction);
+      } catch {
+        if (active.settling !== undefined) return true;
+        const closed = await this.closeTarget(transaction);
+        if (active.settling !== undefined) return !closed;
+        await this.finish({
+          ok: false,
+          switchId: transaction.switchId,
+          reason: 'target-open-failed',
+        });
+        return false;
+      }
+      if (this.active !== active || active.settling !== undefined) return true;
       this.options.onAwaitingReady?.({ ...transaction });
+      return true;
     } catch {
       await this.finish({
         ok: false,
         switchId: transaction.switchId,
         reason: 'target-open-failed',
       });
+      return opened;
     }
+  }
+
+  private async closeTarget(transaction: SwitchTransaction): Promise<boolean> {
+    try {
+      return transaction.target === 'floating'
+        ? await this.options.operations.closeFloating()
+        : await this.options.operations.closeSidePanel(transaction.sourceWindowId);
+    } catch {
+      return false;
+    }
+  }
+
+  private async finishTimedOut(
+    active: ActiveSwitch,
+    result: SurfaceSwitchResult,
+  ): Promise<SurfaceSwitchResult> {
+    if (this.active !== active) return result;
+    if (active.settling !== undefined) return active.settling;
+    clearTimeout(active.timeout);
+    active.settling = (async () => {
+      let opened = false;
+      try {
+        opened = await (active.opening ?? Promise.resolve(false));
+      } catch {
+        opened = false;
+      }
+      if (opened) await this.closeTarget(active.transaction);
+      try {
+        await this.clearStored();
+      } catch {
+        // The opening attempt and its writes are already reconciled.
+      }
+      if (this.active === active) {
+        this.active = undefined;
+        this.restored = undefined;
+        active.resolve(result);
+      }
+      return result;
+    })();
+    return active.settling;
   }
 
   private async finish(result: SurfaceSwitchResult): Promise<SurfaceSwitchResult> {
