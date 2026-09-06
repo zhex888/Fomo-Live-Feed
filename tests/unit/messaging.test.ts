@@ -880,6 +880,7 @@ describe('guards', () => {
       expect(trustClassForMessageType('sync.changed')).toBeNull();
       expect(trustClassForMessageType('sound.playBuy')).toBeNull();
       expect(trustClassForMessageType('surface.switch.changed')).toBeNull();
+      expect(trustClassForMessageType('surface.switch.started')).toBeNull();
       expect(trustClassForMessageType('capture.ping')).toBeNull();
     });
 
@@ -924,6 +925,11 @@ describe('guards', () => {
       ).toBe(true);
     });
 
+    it('accepts an extension popup window whose sender carries its extension tab', () => {
+      const url = 'chrome-extension://' + EXTENSION_ID + '/floatpanel.html';
+      expect(isTrustedPopupSender({ id: EXTENSION_ID, url, tab: { url } }, EXTENSION_ID)).toBe(true);
+    });
+
     it('rejects missing senders and senders without our extension id', () => {
       expect(isTrustedPopupSender(undefined, EXTENSION_ID)).toBe(false);
       expect(isTrustedPopupSender(null, EXTENSION_ID)).toBe(false);
@@ -931,7 +937,7 @@ describe('guards', () => {
       expect(isTrustedPopupSender({ id: 'other-extension' }, EXTENSION_ID)).toBe(false);
     });
 
-    it('never accepts a content-script sender that carries a tab', () => {
+    it('never accepts a content-script sender that carries a web tab', () => {
       expect(
         isTrustedPopupSender(
           { id: EXTENSION_ID, tab: { url: 'https://fomo.family/' } },

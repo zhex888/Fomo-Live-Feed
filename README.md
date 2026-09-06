@@ -24,11 +24,11 @@ Fomo Live Feed 是一款 Chrome 扩展，通过 Chrome 右侧边栏展示当前 
 2. 在 Chrome 地址栏打开 `chrome://extensions`。
 3. 开启右上角的“开发者模式”。
 4. 点击“加载已解压的扩展程序”，选择刚刚解压的目录。
-5. 保持至少一个已登录的 Fomo 页面处于打开状态，并在首次安装或重新加载扩展后刷新该页面。
+5. 保持至少一个已登录的 Fomo 页面处于打开状态；扩展重新加载后会自动恢复监听。
 6. 点击扩展图标，在 Chrome 右侧边栏查看实时信息流。
 
 接收者无需安装此仓库、Node.js 或 pnpm。解压目录中的 `START-HERE.html`
-包含启动及故障排查清单。扩展要求 **Chrome 138 或更高版本**。
+包含启动及故障排查清单。扩展要求 **Chrome 141 或更高版本**。
 
 如需校验下载文件，可在同一 Assets 区域下载
 `Fomo-Live-Feed-v0.3.0-chrome.zip.sha256`。
@@ -46,9 +46,9 @@ Fomo Live Feed 是一款 Chrome 扩展，通过 Chrome 右侧边栏展示当前 
   重复事件、卖出、观点、转入和转出不会触发。
 - **Fomo 快捷跳转**：点击代币名称可复用现有 Fomo 标签页并打开对应链和合约的
   代币页面；无法构造可靠目标时保持普通文本。
-- **悬浮窗模式（可选）**：设置中可将信息流从侧边栏切换为全局唯一的独立悬浮窗；
-  窗口可自由拖动和调整大小并记住尺寸，与侧边栏共享同一份数据，适合放在屏幕一角
-  或副屏盯盘。
+- **侧边栏 / 悬浮窗无缝切换**：两个界面共享后台连接、历史、筛选、设置与备注；
+  目标界面完成数据同步后才关闭原界面，任何时刻只保留一个界面。悬浮窗可自由调整
+  大小并记住位置，扩展重新加载后的 Fomo 监听也会限次自动恢复。
 - **紧凑终端界面**：买入、卖出、观点等事件使用不同语义色边框；工具栏、筛选、
   设置、空状态和加载反馈采用统一的明暗主题设计，同时保持每屏信息密度。
 - **本地存储**：动态历史保存在 IndexedDB；设置与交易者标注保存在
@@ -129,12 +129,12 @@ Assets → `Fomo-Live-Feed-v0.3.0-chrome.zip`**.
 2. Open `chrome://extensions` in Chrome.
 3. Enable **Developer mode** in the top-right corner.
 4. Select **Load unpacked** and choose the extracted directory.
-5. Keep at least one authenticated Fomo page open, and refresh it after the initial installation or an extension reload.
+5. Keep at least one authenticated Fomo page open; the extension automatically restores capture after an extension reload.
 6. Select the extension icon to open the real-time feed in Chrome's Side Panel.
 
 Recipients do not need this repository, Node.js, or pnpm. `START-HERE.html` in
 the extracted directory contains startup and troubleshooting guidance. The
-extension requires **Chrome 138 or newer**.
+extension requires **Chrome 141 or newer**.
 
 To verify the download, get
 `Fomo-Live-Feed-v0.3.0-chrome.zip.sha256` from the same Assets section.
@@ -156,10 +156,10 @@ To verify the download, get
   events.
 - **Fomo navigation:** Select a token symbol to reuse an existing Fomo tab and
   open the verified chain-and-contract route. Unverifiable targets remain text.
-- **Floating window (optional):** Switch the feed from the side panel to a
-  single global floating window in Settings. It is freely resizable, remembers
-  its size, and shares the same data as the side panel — handy for a screen
-  corner or a second monitor while trading.
+- **Seamless Side Panel / floating-window switching:** Both surfaces share the
+  background connection, history, filters, settings, and annotations. The
+  source closes only after the target is synchronized, so exactly one surface
+  remains visible. Capture is also restored automatically after extension reloads.
 - **Compact terminal UI:** Semantic borders distinguish buy, sell, thesis, and
   transfer events. Toolbar, filters, settings, empty states, and loading
   feedback share one light/dark visual system without reducing feed density.

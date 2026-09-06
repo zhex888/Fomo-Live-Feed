@@ -28,7 +28,7 @@ export type SurfaceSwitchResult =
   | { ok: false; switchId: string; reason: SurfaceSwitchFailure };
 
 export interface SurfaceOperations {
-  openFloating(): Promise<boolean>;
+  openFloating(ownerWindowId: number): Promise<boolean>;
   openSidePanel(windowId: number): Promise<boolean>;
   closeFloating(): Promise<boolean>;
   closeSidePanel(windowId: number): Promise<boolean>;
@@ -45,6 +45,7 @@ interface CoordinatorOptions {
   storage: SurfaceSwitchStorage;
   now?: () => number;
   timeoutMs?: number;
+  onAwaitingReady?: (transaction: SwitchTransaction) => void;
 }
 
 interface ActiveSwitch {
@@ -137,21 +138,37 @@ export class SurfaceSwitchCoordinator {
       return { ok: false, switchId: ready.switchId, reason: 'stale-switch' };
     }
 
-    transaction.phase = 'closing-source';
-    await this.persist(transaction);
-    const closed = transaction.source === 'sidepanel'
-      ? await this.options.operations.closeSidePanel(transaction.sourceWindowId)
-      : await this.options.operations.closeFloating();
-    if (!closed) {
+    try {
+      transaction.phase = 'closing-source';
+      await this.persist(transaction);
+      const closed = transaction.source === 'sidepanel'
+        ? await this.options.operations.closeSidePanel(transaction.sourceWindowId)
+        : await this.options.operations.closeFloating();
+      if (!closed) {
+        return this.finish({
+          ok: false,
+          switchId: ready.switchId,
+          reason: 'source-close-failed',
+        });
+      }
+
+      try {
+        await this.options.operations.saveDisplayMode(transaction.target);
+      } catch {
+        return this.finish({
+          ok: false,
+          switchId: ready.switchId,
+          reason: 'state-persist-failed',
+        });
+      }
+      return this.finish({ ok: true, switchId: ready.switchId });
+    } catch {
       return this.finish({
         ok: false,
         switchId: ready.switchId,
-        reason: 'source-close-failed',
+        reason: 'state-persist-failed',
       });
     }
-
-    await this.options.operations.saveDisplayMode(transaction.target);
-    return this.finish({ ok: true, switchId: ready.switchId });
   }
 
   private async openTarget(transaction: SwitchTransaction): Promise<void> {
@@ -159,7 +176,7 @@ export class SurfaceSwitchCoordinator {
       // Invoke the Chrome surface API before the first await so a side-panel
       // open remains inside the originating user-activation task.
       const openPromise = transaction.target === 'floating'
-        ? this.options.operations.openFloating()
+        ? this.options.operations.openFloating(transaction.sourceWindowId)
         : this.options.operations.openSidePanel(transaction.sourceWindowId);
       await this.persist(transaction);
       const opened = await openPromise;
@@ -174,6 +191,7 @@ export class SurfaceSwitchCoordinator {
       if (this.active?.transaction.switchId !== transaction.switchId) return;
       transaction.phase = 'awaiting-ready';
       await this.persist(transaction);
+      this.options.onAwaitingReady?.({ ...transaction });
     } catch {
       await this.finish({
         ok: false,

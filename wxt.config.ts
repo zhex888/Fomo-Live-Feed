@@ -20,10 +20,9 @@ export default defineConfig({
         128: 'icons/icon-128.png',
       },
     },
-    // Task 7 Step 7: the on-device translation API (Translator /
-    // LanguageDetector) ships in Chrome 138, so the extension no longer
-    // installs on older builds.
-    minimum_chrome_version: '138',
+    // Atomic Side Panel -> floating-window handoff uses sidePanel.close(),
+    // which is available from Chrome 141.
+    minimum_chrome_version: '141',
     permissions: ['storage', 'sidePanel', 'offscreen'],
     host_permissions: [
       'https://fomo.family/*',

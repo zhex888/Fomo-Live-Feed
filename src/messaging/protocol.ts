@@ -52,6 +52,7 @@ export const SURFACE_SWITCH_FAILURES = [
   'target-ready-timeout',
   'stale-switch',
   'source-close-failed',
+  'state-persist-failed',
 ] as const;
 export type SurfaceSwitchFailure = (typeof SURFACE_SWITCH_FAILURES)[number];
 
@@ -250,6 +251,11 @@ const surfaceSwitchChangedPayloadSchema = z
     }).strict(),
   ]);
 
+const surfaceSwitchStartedPayloadSchema = z.object({
+  switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
+  target: z.enum(SURFACE_KEYS),
+}).strict();
+
 // Versioned, discriminated message union for every extension context. Keep the
 // branch list in KNOWN_MESSAGE_TYPES in sync with this union.
 export const extensionMessageSchema = z.discriminatedUnion('type', [
@@ -378,6 +384,11 @@ export const extensionMessageSchema = z.discriminatedUnion('type', [
     protocolVersion: z.literal(PROTOCOL_VERSION),
     type: z.literal('surface.switch.changed'),
     payload: surfaceSwitchChangedPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('surface.switch.started'),
+    payload: surfaceSwitchStartedPayloadSchema,
   }).strict(),
   z.object({
     protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -587,6 +598,7 @@ const KNOWN_MESSAGE_TYPES = [
   'surface.bootstrap',
   'surface.ready',
   'surface.switch.changed',
+  'surface.switch.started',
   'capture.ping',
   'navigation.openToken',
   'translation.request',

@@ -57,6 +57,10 @@ describe('SurfaceSwitchCoordinator', () => {
     const { coordinator, operations } = createHarness();
     const pending = coordinator.request(toFloating);
     await vi.waitFor(() => expect(operations.openFloating).toHaveBeenCalledOnce());
+    expect(operations.openFloating).toHaveBeenCalledWith(7);
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('floating')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
     expect(operations.closeSidePanel).not.toHaveBeenCalled();
 
     await expect(coordinator.ready({
@@ -75,6 +79,9 @@ describe('SurfaceSwitchCoordinator', () => {
       switchId: 'switch-2', source: 'floating', target: 'sidepanel', sourceWindowId: 9,
     });
     await vi.waitFor(() => expect(operations.openSidePanel).toHaveBeenCalledWith(9));
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('sidepanel')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
     await coordinator.ready({ switchId: 'switch-2', surface: 'sidepanel', eventWatermark: 4 });
     await expect(pending).resolves.toMatchObject({ ok: true });
     expect(operations.closeFloating).toHaveBeenCalledOnce();
@@ -122,6 +129,19 @@ describe('SurfaceSwitchCoordinator', () => {
       ok: false, switchId: 'switch-1', reason: 'target-ready-timeout',
     });
     expect(operations.closeSidePanel).not.toHaveBeenCalled();
+  });
+
+  it('settles with a closed failure when display-mode persistence rejects', async () => {
+    const { coordinator, operations } = createHarness();
+    vi.mocked(operations.saveDisplayMode).mockRejectedValueOnce(new Error('write failed'));
+    const pending = coordinator.request(toFloating);
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('floating')).toMatchObject({
+      phase: 'awaiting-ready',
+    }));
+    await coordinator.ready({ switchId: 'switch-1', surface: 'floating', eventWatermark: 0 });
+    await expect(pending).resolves.toEqual({
+      ok: false, switchId: 'switch-1', reason: 'state-persist-failed',
+    });
   });
 
   it('restores a live transaction after worker reconstruction', async () => {

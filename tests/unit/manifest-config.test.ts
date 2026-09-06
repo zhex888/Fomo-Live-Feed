@@ -12,7 +12,7 @@ describe('extension manifest configuration', () => {
     expect(manifest).not.toHaveProperty('action.default_popup');
   });
 
-  it('requires Chrome 138 for the on-device translation API', () => {
+  it('requires Chrome 141 for atomic side-panel closure', () => {
     const manifest = config.manifest as { minimum_chrome_version?: string } | undefined;
 
     expect(typeof manifest).toBe('object');
@@ -23,7 +23,7 @@ describe('extension manifest configuration', () => {
 
     // WXT's UserManifest type is looser than the emitted manifest; read the
     // browser version field via a narrow projection.
-    expect(manifest.minimum_chrome_version).toBe('138');
+    expect(manifest.minimum_chrome_version).toBe('141');
   });
 
   it('does not inject into or request access to trading pages', () => {

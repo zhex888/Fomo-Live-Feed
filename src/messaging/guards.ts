@@ -86,17 +86,19 @@ export function isTrustedFomoSender(
  * True only when the sender is one of THIS extension's own privileged UI
  * pages (the toolbar popup, for example).
  *
- * A popup sender has no `tab`, its `id` is our own extension id, and its
- * `url` (when present) must be a `chrome-extension://<our-id>/...` page.
+ * A Side Panel sender has no `tab`; an extension page opened with
+ * chrome.windows.create does carry its own extension `tab`. In both cases the
+ * sender id and every present URL must belong to this extension.
  * Every check is required:
  *
- * - `sender.tab` must be absent, so a content script (which always carries a
- *   tab) can never satisfy this guard.
  * - `sender.id` must equal expectedExtensionId, so another extension cannot
  *   impersonate us.
  * - A present `sender.url` must parse to our own chrome-extension page; a
  *   missing url is accepted because Chrome popup senders do not always carry
  *   one, but any url that is present is verified.
+ * - When `sender.tab` exists, both sender.url and tab.url must be extension
+ *   pages. This admits our floating window without admitting a content script
+ *   running in a Fomo or unrelated web tab.
  */
 export function isTrustedPopupSender(
   sender: MessageSenderLike | null | undefined,
@@ -110,23 +112,25 @@ export function isTrustedPopupSender(
     return false;
   }
 
-  if (sender.tab !== undefined) {
-    return false;
-  }
-
-  if (sender.url === undefined) {
+  if (sender.tab === undefined && sender.url === undefined) {
     return true;
   }
 
-  let url: URL;
+  const isOwnExtensionUrl = (value: unknown): boolean => {
+    if (typeof value !== 'string') return false;
+    let url: URL;
 
-  try {
-    url = new URL(sender.url);
-  } catch {
-    return false;
-  }
+    try {
+      url = new URL(value);
+    } catch {
+      return false;
+    }
 
-  return url.protocol === 'chrome-extension:' && url.host === expectedExtensionId;
+    return url.protocol === 'chrome-extension:' && url.host === expectedExtensionId;
+  };
+
+  if (!isOwnExtensionUrl(sender.url)) return false;
+  return sender.tab === undefined || isOwnExtensionUrl(sender.tab.url);
 }
 
 /**
@@ -183,6 +187,7 @@ export function trustClassForMessageType(
     case 'sync.changed':
     case 'sound.playBuy':
     case 'surface.switch.changed':
+    case 'surface.switch.started':
     case 'capture.ping':
       // Outbound-only worker -> overlay message: no inbound sender class is
       // valid, so the worker rejects any inbound broadcast (see docstring).

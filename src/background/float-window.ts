@@ -29,6 +29,7 @@ export const FLOAT_GEOMETRY_STORAGE_KEY = 'floatWindow.geometry.v1';
 
 /** The session key holding the live float window id across worker restarts. */
 export const FLOAT_WINDOW_ID_SESSION_KEY = 'floatWindow.windowId';
+export const FLOAT_OWNER_WINDOW_ID_SESSION_KEY = 'floatWindow.ownerWindowId';
 
 interface ChromeWindowSnapshot {
   id?: number | undefined;
@@ -113,6 +114,7 @@ export function parseFloatGeometry(value: unknown): FloatWindowGeometry {
  */
 export class FloatWindowManager {
   private openRequest: Promise<OpenFloatWindowResult> | undefined;
+  private ownerWindowIdCache: number | undefined;
 
   constructor(
     private readonly chrome: FloatWindowChrome,
@@ -125,7 +127,13 @@ export class FloatWindowManager {
    * call, so a window the user closed (or a stale id from a dead worker) is
    * never focused blindly.
    */
-  async openOrFocus(): Promise<OpenFloatWindowResult> {
+  async openOrFocus(ownerWindowId?: number): Promise<OpenFloatWindowResult> {
+    if (ownerWindowId !== undefined && Number.isInteger(ownerWindowId) && ownerWindowId >= 0) {
+      this.ownerWindowIdCache = ownerWindowId;
+      await this.storage.session.set({
+        [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: ownerWindowId,
+      });
+    }
     if (this.openRequest !== undefined) {
       return this.openRequest;
     }
@@ -140,6 +148,20 @@ export class FloatWindowManager {
         this.openRequest = undefined;
       }
     }
+  }
+
+  async ownerWindowId(): Promise<number | undefined> {
+    const stored = await this.storage.session.get([FLOAT_OWNER_WINDOW_ID_SESSION_KEY]);
+    const value = stored[FLOAT_OWNER_WINDOW_ID_SESSION_KEY];
+    this.ownerWindowIdCache = typeof value === 'number' && Number.isInteger(value) && value >= 0
+      ? value
+      : undefined;
+    return this.ownerWindowIdCache;
+  }
+
+  /** Read the preloaded owner without crossing Chrome's user-activation boundary. */
+  cachedOwnerWindowId(): number | undefined {
+    return this.ownerWindowIdCache;
   }
 
   /** Close the tracked floating window. Missing/stale windows are already closed. */
@@ -159,6 +181,8 @@ export class FloatWindowManager {
       }
     } finally {
       await this.clearSessionWindowId();
+      await this.storage.session.set({ [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: -1 });
+      this.ownerWindowIdCache = undefined;
     }
   }
 

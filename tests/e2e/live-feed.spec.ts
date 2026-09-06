@@ -548,26 +548,41 @@ const ensureSettingsClosed = (panel: AttachedTarget): Promise<void> =>
 /**
  * Opens the extension's REAL Side Panel and attaches to its extension target.
  */
-async function openSidePanel(cdp: CDPSession, tabId: number): Promise<AttachedTarget> {
+async function openSidePanel(cdp: CDPSession, _tabId: number): Promise<AttachedTarget> {
   if (context === null || extensionId === null) {
     throw new Error('extension browser context is not available');
   }
 
   const triggerPage = await context.newPage();
   await triggerPage.goto(`chrome-extension://${extensionId}/sidepanel.html?e2e-trigger`);
-  await triggerPage.evaluate((targetTabId) => {
+  await triggerPage.evaluate(() => {
     const button = document.createElement('button');
     button.id = 'open-real-side-panel';
     button.addEventListener('click', () => {
       void (globalThis as unknown as {
-        chrome: { sidePanel: { open(options: { tabId: number }): Promise<void> } };
-      }).chrome.sidePanel.open({ tabId: targetTabId });
+        chrome: {
+          windows: { getCurrent(): Promise<{ id?: number }> };
+          sidePanel: { open(options: { windowId: number }): Promise<void> };
+        };
+      }).chrome.windows.getCurrent().then((window) => {
+        if (window.id !== undefined) {
+          return (globalThis as unknown as {
+            chrome: { sidePanel: { open(options: { windowId: number }): Promise<void> } };
+          }).chrome.sidePanel.open({ windowId: window.id });
+        }
+      });
     });
     document.body.append(button);
-  }, tabId);
+  });
 
   await triggerPage.locator('#open-real-side-panel').click();
 
+  await triggerPage.close();
+  return attachSidePanelTarget(cdp);
+}
+
+async function attachSidePanelTarget(cdp: CDPSession): Promise<AttachedTarget> {
+  if (extensionId === null) throw new Error('extension id is unavailable');
   let targetId: string | null = null;
 
   for (let attempt = 0; attempt < 40 && targetId === null; attempt += 1) {
@@ -589,11 +604,8 @@ async function openSidePanel(cdp: CDPSession, tabId: number): Promise<AttachedTa
   }
 
   if (targetId === null) {
-    await triggerPage.close();
     throw new Error('the extension Side Panel did not open');
   }
-
-  await triggerPage.close();
 
   const attach = (await cdp.send('Target.attachToTarget', {
     targetId,
@@ -770,7 +782,7 @@ test.describe('Fomo Live Feed extension', () => {
     expect(manifest.action).toBeDefined();
     expect(manifest.action?.default_popup).toBeUndefined();
     expect(manifest.side_panel?.default_path).toBe('sidepanel.html');
-    expect(manifest.minimum_chrome_version).toBe('138');
+    expect(manifest.minimum_chrome_version).toBe('141');
     expect([...(manifest.permissions ?? [])].sort()).toEqual([
       'offscreen',
       'sidePanel',
@@ -861,6 +873,65 @@ test.describe('Fomo Live Feed extension', () => {
     } finally {
       await floatingPage?.close();
       await panel.close();
+      await fomoPage.close();
+    }
+  });
+
+  test('atomically switches between Side Panel and floating window without losing feed state', async () => {
+    if (context === null || extensionId === null || worker === null) {
+      throw new Error('extension browser context is not available');
+    }
+
+    await seedStoredSettings({ displayMode: 'sidepanel' });
+    const fomoPage = await context.newPage();
+    await fomoPage.goto(fomoUrl());
+    await emit(fomoPage, uniquePayload(901));
+    const cdp = await context.newCDPSession(fomoPage);
+    const panel = await openSidePanel(cdp, await fomoTabId());
+    let floatingPage: Page | undefined;
+    let reopenedPanel: AttachedTarget | undefined;
+
+    const sidePanelTargetCount = async (): Promise<number> => {
+      const result = await cdp.send('Target.getTargets') as {
+        targetInfos?: Array<{ url?: string }>;
+      };
+      return (result.targetInfos ?? []).filter(
+        (target) => target.url === `chrome-extension://${extensionId}/sidepanel.html`,
+      ).length;
+    };
+
+    try {
+      await expect.poll(() => panel.hasText('$TOKEN901'), { timeout: 15_000 }).toBe(true);
+      await ensureSettingsOpen(panel);
+      await panel.clickWithUserGesture(
+        '.settings-display-mode-switcher .display-mode-switcher-button:nth-of-type(2)',
+      );
+
+      await expect.poll(() => {
+        floatingPage = context!.pages().find(
+          (page) => page.url() === `chrome-extension://${extensionId}/floatpanel.html`,
+        );
+        return floatingPage !== undefined;
+      }, { timeout: 15_000 }).toBe(true);
+      await expect.poll(async () => (await readStoredSettings()).displayMode, {
+        timeout: 15_000,
+      }).toBe('floating');
+      await panel.dispose();
+
+      if (floatingPage === undefined) throw new Error('floating target did not open');
+      await expect(floatingPage.getByText('$TOKEN901')).toHaveCount(1);
+      await floatingPage.locator(SETTINGS_TOGGLE).click();
+      await floatingPage.getByRole('button', { name: 'Side panel' }).click();
+
+      await expect.poll(() => floatingPage!.isClosed(), { timeout: 15_000 }).toBe(true);
+      await expect.poll(sidePanelTargetCount, { timeout: 15_000 }).toBe(1);
+      reopenedPanel = await attachSidePanelTarget(cdp);
+      await expect.poll(() => reopenedPanel!.hasText('$TOKEN901'), { timeout: 15_000 }).toBe(true);
+      expect((await readStoredSettings()).displayMode).toBe('sidepanel');
+    } finally {
+      await panel.dispose();
+      await reopenedPanel?.close();
+      await floatingPage?.close();
       await fomoPage.close();
     }
   });

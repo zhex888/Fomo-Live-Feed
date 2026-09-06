@@ -71,6 +71,9 @@ function createHarness(connection: ConnectionQueryResponse) {
   let storageSetFailure = false;
   let events: TradeEventV1[] = [];
   let surfaceSwitchResult: unknown = { ok: true, switchId: 'switch-result' };
+  let surfaceBootstrapResult: unknown = { ok: true };
+  let surfaceReadyResult: unknown = { ok: true, switchId: 'ready-result' };
+  let surfaceBootstrapCalls = 0;
 
   const deps: SidePanelDependencies = {
     runtime: {
@@ -115,7 +118,11 @@ function createHarness(connection: ConnectionQueryResponse) {
           };
           return { ok: true };
         }
-        if (type === 'surface.bootstrap') return { ok: true };
+        if (type === 'surface.bootstrap') {
+          surfaceBootstrapCalls += 1;
+          return surfaceBootstrapResult;
+        }
+        if (type === 'surface.ready') return surfaceReadyResult;
         if (type === 'surface.switch.request') return surfaceSwitchResult;
         return { ok: true };
       },
@@ -181,6 +188,13 @@ function createHarness(connection: ConnectionQueryResponse) {
     setSurfaceSwitchResult(next: unknown) {
       surfaceSwitchResult = next;
     },
+    surfaceBootstrapCalls: () => surfaceBootstrapCalls,
+    setSurfaceBootstrapResult(next: unknown) {
+      surfaceBootstrapResult = next;
+    },
+    setSurfaceReadyResult(next: unknown) {
+      surfaceReadyResult = next;
+    },
     emit(message: unknown) {
       listeners.forEach((listener) => listener(message));
     },
@@ -204,6 +218,45 @@ afterEach(() => {
 });
 
 describe('SidePanelApp', () => {
+  it('polls bootstrap until a missed target-ready wakeup becomes observable', async () => {
+    const harness = createHarness({
+      ok: true, connected: true, authenticated: true, hasFomoTab: true,
+    });
+    harness.deps.surface = 'floatpanel';
+    harness.deps.getCurrentWindowId = async () => 23;
+    harness.setSurfaceBootstrapResult({
+      ok: true,
+      transaction: {
+        switchId: 'missed-wakeup',
+        source: 'sidepanel',
+        target: 'floating',
+        sourceWindowId: 17,
+        phase: 'opening',
+        startedAt: 1_800_000_000_000,
+      },
+    });
+    render(<SidePanelApp deps={harness.deps} />);
+
+    const readyMessages = (): unknown[] => harness.sentMessages().filter(
+      (message) => (message as { type?: string }).type === 'surface.ready',
+    );
+    await waitFor(() => expect(harness.surfaceBootstrapCalls()).toBeGreaterThan(1));
+    expect(readyMessages()).toHaveLength(0);
+    harness.setSurfaceBootstrapResult({
+      ok: true,
+      transaction: {
+        switchId: 'missed-wakeup',
+        source: 'sidepanel',
+        target: 'floating',
+        sourceWindowId: 17,
+        phase: 'awaiting-ready',
+        startedAt: 1_800_000_000_000,
+      },
+    });
+
+    await waitFor(() => expect(readyMessages()).toHaveLength(1), { timeout: 2_000 });
+  });
+
   it('requests an atomic switch to the other surface from settings', async () => {
     const harness = createHarness({
       ok: true, connected: true, authenticated: true, hasFomoTab: true,
@@ -637,8 +690,9 @@ describe('SidePanelApp', () => {
 
     await act(async () => { await Promise.resolve(); });
     expect(harness.healthQueries()).toBe(1);
-    // Connection, health, feed changes, sync changes, and translation-ready.
-    expect(harness.listenerCount()).toBe(5);
+    // Connection, health, feed changes, sync changes, translation-ready, and
+    // atomic surface-switch readiness.
+    expect(harness.listenerCount()).toBe(6);
 
     unmount();
     expect(harness.listenerCount()).toBe(0);

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_FLOAT_GEOMETRY,
   FLOAT_GEOMETRY_STORAGE_KEY,
+  FLOAT_OWNER_WINDOW_ID_SESSION_KEY,
   FLOAT_WINDOW_ID_SESSION_KEY,
   FloatWindowManager,
   parseFloatGeometry,
@@ -327,5 +328,24 @@ describe('FloatWindowManager.close', () => {
 
     await expect(manager.close()).resolves.toBe(true);
     expect(session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+  });
+});
+
+describe('FloatWindowManager owner window', () => {
+  it('remembers the normal browser window that opened the float', async () => {
+    const { manager, session } = createHarness();
+    await manager.openOrFocus(77);
+    expect(session.snapshot()[FLOAT_OWNER_WINDOW_ID_SESSION_KEY]).toBe(77);
+    expect(manager.cachedOwnerWindowId()).toBe(77);
+    await expect(manager.ownerWindowId()).resolves.toBe(77);
+  });
+
+  it('hydrates the synchronous owner cache from session storage', async () => {
+    const { manager, session } = createHarness();
+    session.seed({ [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 88 });
+
+    expect(manager.cachedOwnerWindowId()).toBeUndefined();
+    await expect(manager.ownerWindowId()).resolves.toBe(88);
+    expect(manager.cachedOwnerWindowId()).toBe(88);
   });
 });

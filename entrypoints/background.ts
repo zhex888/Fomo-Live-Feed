@@ -241,8 +241,13 @@ export default defineBackground(() => {
   const sidePanelChrome = browser as unknown as ChromeWithOptionalSidePanel;
   const surfaceSwitchCoordinator = new SurfaceSwitchCoordinator({
     operations: {
-      openFloating: async () => (await floatWindowManager.openOrFocus()).ok,
-      openSidePanel: (windowId) => openSidePanelForWindow(windowId, sidePanelChrome),
+      openFloating: async (ownerWindowId) => (
+        await floatWindowManager.openOrFocus(ownerWindowId)
+      ).ok,
+      openSidePanel: (sourceWindowId) => openSidePanelForWindow(
+        floatWindowManager.cachedOwnerWindowId() ?? sourceWindowId,
+        sidePanelChrome,
+      ),
       closeFloating: () => floatWindowManager.close(),
       closeSidePanel: (windowId) => closeSidePanelForWindow(windowId, sidePanelChrome),
       saveDisplayMode: async (mode) => {
@@ -252,17 +257,25 @@ export default defineBackground(() => {
       },
     },
     storage: sessionStorage,
+    onAwaitingReady: (transaction) => {
+      const started: ExtensionMessage = {
+        protocolVersion: 1,
+        type: 'surface.switch.started',
+        payload: { switchId: transaction.switchId, target: transaction.target },
+      };
+      void browser.runtime.sendMessage(started).catch(() => {});
+    },
   });
 
   // When the side panel behavior is OFF (floating mode), Chrome fires
   // action.onClicked instead of opening the panel. The listener must ALWAYS
   // be registered (registering it does not suppress the side panel; only
   // openPanelOnActionClick:false does) so mode flips need no re-registration.
-  browser.action.onClicked.addListener(() => {
+  browser.action.onClicked.addListener((tab) => {
     if (currentDisplayMode !== 'floating') {
       return;
     }
-    void floatWindowManager.openOrFocus().then((result) => {
+    void floatWindowManager.openOrFocus(tab.windowId).then((result) => {
       if (!result.ok) {
         diagnostics.record({
           code: 'storage_failure',
@@ -804,8 +817,13 @@ export default defineBackground(() => {
           });
         case 'surface.bootstrap':
           void captureRecovery.ensureCapture('surface-open').catch(() => {});
-          return surfaceSwitchCoordinator.bootstrap(message.payload.surface).then(
-            (transaction) => ({
+          return Promise.all([
+            surfaceSwitchCoordinator.bootstrap(message.payload.surface),
+            message.payload.surface === 'floating'
+              ? floatWindowManager.ownerWindowId()
+              : Promise.resolve(undefined),
+          ]).then(
+            ([transaction]) => ({
               ok: true as const,
               ...(transaction === undefined ? {} : { transaction }),
             }),
@@ -813,6 +831,7 @@ export default defineBackground(() => {
         case 'surface.ready':
           return surfaceSwitchCoordinator.ready(message.payload);
         case 'surface.switch.changed':
+        case 'surface.switch.started':
           return undefined;
         case 'sync.request':
           // Task 5 Step 5: the side panel/popup asks for a bounded backfill.
