@@ -112,6 +112,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   );
   const [childMayBeLive, setChildMayBeLive] = useState(false);
   const [childOwnsRead, setChildOwnsRead] = useState(false);
+  const [activationPending, setActivationPending] = useState(false);
   const sessionRef = useRef<ActiveSession | undefined>(undefined);
   const activationInFlightRef = useRef(false);
   const mountedRef = useRef(true);
@@ -334,10 +335,13 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     // Keep requestWindow inside the trusted click task. No worker or storage
     // await may run before this call.
     const activation = controller.activate();
+    setActivationPending(true);
     setState('opening');
     void activation.then((result) => {
       activationInFlightRef.current = false;
-      if (!mountedRef.current || sessionRef.current !== session) return;
+      if (!mountedRef.current) return;
+      setActivationPending(false);
+      if (sessionRef.current !== session) return;
       if (session.terminal) return;
       if (!result.ok) {
         session.cleanup?.();
@@ -346,7 +350,9 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     });
   }, [controller, props.createSessionId]);
 
-  const busy = state === 'opening' || state === 'awaiting-pip-ready';
+  const busy = activationPending
+    || state === 'opening'
+    || state === 'awaiting-pip-ready';
   const showFeed = state !== 'unsupported'
     && state !== 'active'
     && !(state === 'error' && childMayBeLive);

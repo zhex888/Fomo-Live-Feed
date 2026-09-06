@@ -611,6 +611,56 @@ describe('FloatingSurfaceHost', () => {
       .toBeEnabled();
   });
 
+  it('keeps recovery gated until the closed activation settles, then starts a fresh request', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 30;
+    const opened = deferred<unknown>();
+    let openedCalls = 0;
+    harness.setResponse('pip.opened', () => {
+      openedCalls += 1;
+      return openedCalls === 1 ? opened.promise : { ok: true, created: true };
+    });
+    const firstPip = createPipWindow();
+    const secondPip = createPipWindow();
+    const requestWindow = vi
+      .fn<DocumentPictureInPictureLike['requestWindow']>()
+      .mockResolvedValueOnce(firstPip.pipWindow)
+      .mockResolvedValueOnce(secondPip.pipWindow);
+    const mountPipFeed = vi.fn<MountPipFeed>(() => vi.fn());
+
+    render(
+      <StrictMode>
+        <FloatingSurfaceHost
+          deps={harness.deps}
+          documentPip={{ window: null, requestWindow }}
+          mountPipFeed={mountPipFeed}
+        />
+      </StrictMode>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(openedCalls).toBe(1));
+
+    act(() => firstPip.dispatchPageHide());
+    const reopen = await screen.findByRole('button', {
+      name: 'Reopen always-on-top window',
+    });
+    expect(reopen).toBeDisabled();
+    expect(reopen).toHaveAttribute('aria-busy', 'true');
+    fireEvent.click(reopen);
+    expect(requestWindow).toHaveBeenCalledTimes(1);
+
+    opened.resolve({ ok: true, created: true });
+    await act(async () => {
+      await opened.promise;
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(reopen).toBeEnabled());
+
+    fireEvent.click(reopen);
+    await waitFor(() => expect(requestWindow).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mountPipFeed).toHaveBeenCalledTimes(1));
+  });
+
   it('tears down a mounted PiP feed once across host unmount and later pagehide', async () => {
     const harness = createHarness('floatpanel');
     harness.deps.getCurrentWindowId = async () => 35;
