@@ -530,8 +530,23 @@ export class FloatWindowManager {
     return this.runLifecycleMutation(() => this.closeOnce());
   }
 
-  private async closeOnce(): Promise<boolean> {
+  /** Close only the PiP host identified by the durable switch transaction. */
+  async closeExpectedPip(hostWindowId: number, sessionId: string): Promise<boolean> {
+    this.openRequest = undefined;
+    return this.runLifecycleMutation(() => this.closeOnce({ hostWindowId, sessionId }));
+  }
+
+  /** Close only the floating host created by the durable switch transaction. */
+  async closeExpectedWindow(hostWindowId: number): Promise<boolean> {
+    this.openRequest = undefined;
+    return this.runLifecycleMutation(() => this.closeOnce({ hostWindowId }));
+  }
+
+  private async closeOnce(
+    expected?: { hostWindowId: number; sessionId?: string },
+  ): Promise<boolean> {
     let existingId: number | undefined;
+    let pipSession: PipSessionState | undefined;
     try {
       const stored = await this.storage.session.get([
         FLOAT_WINDOW_ID_SESSION_KEY,
@@ -542,8 +557,25 @@ export class FloatWindowManager {
       existingId = typeof value === 'number' && Number.isInteger(value) && value >= 0
         ? value
         : undefined;
+      pipSession = parsePipSession(stored[PIP_SESSION_STORAGE_KEY]);
     } catch {
       return false;
+    }
+
+    if (expected !== undefined) {
+      if (existingId === undefined || existingId !== expected.hostWindowId) return true;
+      if (expected.sessionId !== undefined && (
+        pipSession !== undefined
+        && (
+          pipSession.hostWindowId !== expected.hostWindowId
+          || pipSession.sessionId !== expected.sessionId
+        )
+      )) return true;
+      if (expected.sessionId !== undefined && (
+        pipSession === undefined
+        || pipSession.hostWindowId !== expected.hostWindowId
+        || pipSession.sessionId !== expected.sessionId
+      )) return false;
     }
 
     if (existingId !== undefined) {

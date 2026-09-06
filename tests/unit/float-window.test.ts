@@ -383,6 +383,51 @@ describe('FloatWindowManager.openOrFocus', () => {
 });
 
 describe('FloatWindowManager.close', () => {
+  it('does not close a replacement PiP host when reconciling an older session', async () => {
+    const harness = createHarness();
+    const original = await harness.manager.openOrFocus(77);
+    if (!original.ok) throw new Error('expected original open');
+    await harness.manager.registerPipOpened(original.windowId, 'pip-original');
+    await harness.manager.close();
+
+    const replacement = await harness.manager.openOrFocus(88);
+    if (!replacement.ok) throw new Error('expected replacement open');
+    await harness.manager.registerPipOpened(replacement.windowId, 'pip-replacement');
+    const guardedManager = harness.manager as FloatWindowManager & {
+      closeExpectedPip(hostWindowId: number, sessionId: string): Promise<boolean>;
+    };
+
+    await expect(guardedManager.closeExpectedPip(
+      original.windowId,
+      'pip-original',
+    )).resolves.toBe(true);
+    expect(harness.removeCalls).toEqual([original.windowId]);
+    expect(harness.liveWindows.has(replacement.windowId)).toBe(true);
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: replacement.windowId,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 88,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-replacement',
+        hostWindowId: replacement.windowId,
+        phase: 'opened',
+      },
+    });
+  });
+
+  it('does not close a replacement floating host when reconciling an older target', async () => {
+    const harness = createHarness();
+    const original = await harness.manager.openOrFocus(77);
+    if (!original.ok) throw new Error('expected original open');
+    await harness.manager.close();
+    const replacement = await harness.manager.openOrFocus(88);
+    if (!replacement.ok) throw new Error('expected replacement open');
+
+    await expect(harness.manager.closeExpectedWindow(original.windowId)).resolves.toBe(true);
+    expect(harness.removeCalls).toEqual([original.windowId]);
+    expect(harness.liveWindows.has(replacement.windowId)).toBe(true);
+    expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(replacement.windowId);
+  });
+
   it('closes the active floating window and clears its session id', async () => {
     const { manager, session, removeCalls } = createHarness();
     const opened = await manager.openOrFocus();

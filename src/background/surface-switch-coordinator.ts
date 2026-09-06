@@ -12,6 +12,17 @@ export interface SurfaceSwitchRequest {
   source: SurfaceKey;
   target: SurfaceKey;
   sourceWindowId: number;
+  sourceIdentity?: PipSurfaceIdentity;
+  targetIdentity?: FloatingSurfaceIdentity;
+}
+
+export interface PipSurfaceIdentity {
+  hostWindowId: number;
+  sessionId: string;
+}
+
+export interface FloatingSurfaceIdentity {
+  hostWindowId: number;
 }
 
 export interface SurfaceReady {
@@ -37,9 +48,9 @@ export type SurfaceSwitchResult =
   | { ok: false; switchId: string; reason: SurfaceSwitchFailure };
 
 export interface SurfaceOperations {
-  openFloating(ownerWindowId: number): Promise<boolean>;
+  openFloating(ownerWindowId: number): Promise<boolean | number>;
   openSidePanel(windowId: number): Promise<boolean>;
-  closeFloating(): Promise<boolean>;
+  closeFloating(expected?: PipSurfaceIdentity | FloatingSurfaceIdentity): Promise<boolean>;
   closeSidePanel(windowId: number): Promise<boolean>;
   saveDisplayMode(mode: SurfaceKey): Promise<void>;
 }
@@ -74,6 +85,7 @@ interface ActiveSwitch {
   phasePersistence: Promise<boolean> | undefined;
   phasePersisted: boolean;
   phasePersistRetriesRemaining: number;
+  modeRollbackRetriesRemaining: number;
   durableMarker: Promise<boolean> | undefined;
   durableClear: Promise<boolean> | undefined;
   durableMarkerPersisted: boolean;
@@ -116,15 +128,29 @@ const TRANSACTION_KEYS = [
   'startedAt',
 ] as const;
 
+const SOURCE_IDENTITY_KEY = 'sourceIdentity';
+const TARGET_IDENTITY_KEY = 'targetIdentity';
+
 export function parseSwitchTransaction(
   value: unknown,
   now: number,
 ): SwitchTransaction | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const item = value as Record<string, unknown>;
+  const sourceIdentity = item.sourceIdentity;
+  const hasSourceIdentity = Object.hasOwn(item, SOURCE_IDENTITY_KEY);
+  const targetIdentity = item.targetIdentity;
+  const hasTargetIdentity = Object.hasOwn(item, TARGET_IDENTITY_KEY);
   if (
     Object.keys(item).length !== TRANSACTION_KEYS.length
+      + (hasSourceIdentity ? 1 : 0)
+      + (hasTargetIdentity ? 1 : 0)
     || !TRANSACTION_KEYS.every((key) => Object.hasOwn(item, key))
+    || Object.keys(item).some((key) => (
+      !TRANSACTION_KEYS.includes(key as typeof TRANSACTION_KEYS[number])
+      && key !== SOURCE_IDENTITY_KEY
+      && key !== TARGET_IDENTITY_KEY
+    ))
     || typeof item.switchId !== 'string'
     || item.switchId.trim() !== item.switchId
     || item.switchId.length === 0
@@ -146,6 +172,38 @@ export function parseSwitchTransaction(
       'target-closed',
       'source-closed',
     ].includes(String(item.phase))
+    || (
+      hasSourceIdentity
+      && (
+        item.source !== 'floating'
+        || typeof sourceIdentity !== 'object'
+        || sourceIdentity === null
+        || Array.isArray(sourceIdentity)
+        || Object.keys(sourceIdentity).length !== 2
+        || !Object.hasOwn(sourceIdentity, 'hostWindowId')
+        || !Object.hasOwn(sourceIdentity, 'sessionId')
+        || !Number.isInteger((sourceIdentity as Record<string, unknown>).hostWindowId)
+        || ((sourceIdentity as Record<string, unknown>).hostWindowId as number) < 0
+        || typeof (sourceIdentity as Record<string, unknown>).sessionId !== 'string'
+        || ((sourceIdentity as Record<string, unknown>).sessionId as string).trim()
+          !== (sourceIdentity as Record<string, unknown>).sessionId
+        || ((sourceIdentity as Record<string, unknown>).sessionId as string).length === 0
+        || ((sourceIdentity as Record<string, unknown>).sessionId as string).length > 128
+      )
+    )
+    || (
+      hasTargetIdentity
+      && (
+        item.target !== 'floating'
+        || typeof targetIdentity !== 'object'
+        || targetIdentity === null
+        || Array.isArray(targetIdentity)
+        || Object.keys(targetIdentity).length !== 1
+        || !Object.hasOwn(targetIdentity, 'hostWindowId')
+        || !Number.isInteger((targetIdentity as Record<string, unknown>).hostWindowId)
+        || ((targetIdentity as Record<string, unknown>).hostWindowId as number) < 0
+      )
+    )
   ) return undefined;
   return item as unknown as SwitchTransaction;
 }
@@ -473,6 +531,7 @@ export class SurfaceSwitchCoordinator {
       phasePersistence: undefined,
       phasePersisted: false,
       phasePersistRetriesRemaining: this.targetCloseRetryLimit,
+      modeRollbackRetriesRemaining: this.targetCloseRetryLimit,
       durableMarker: undefined,
       durableClear: undefined,
       durableMarkerPersisted: false,
@@ -507,6 +566,7 @@ export class SurfaceSwitchCoordinator {
       phasePersistence: undefined,
       phasePersisted: true,
       phasePersistRetriesRemaining: this.targetCloseRetryLimit,
+      modeRollbackRetriesRemaining: this.targetCloseRetryLimit,
       durableMarker: undefined,
       durableClear: undefined,
       durableMarkerPersisted:
@@ -563,7 +623,7 @@ export class SurfaceSwitchCoordinator {
     try {
       closed = active.transaction.source === 'sidepanel'
         ? await this.options.operations.closeSidePanel(active.transaction.sourceWindowId)
-        : await this.options.operations.closeFloating();
+        : await this.options.operations.closeFloating(active.transaction.sourceIdentity);
     } catch {
       closed = false;
     }
@@ -625,7 +685,13 @@ export class SurfaceSwitchCoordinator {
 
   private openTargetOperation(request: SurfaceSwitchRequest): Promise<boolean> {
     return request.target === 'floating'
-      ? this.options.operations.openFloating(request.sourceWindowId)
+      ? this.options.operations.openFloating(request.sourceWindowId).then((result) => {
+        if (typeof result === 'number') {
+          request.targetIdentity = { hostWindowId: result };
+          return true;
+        }
+        return result;
+      })
       : this.options.operations.openSidePanel(request.sourceWindowId);
   }
 
@@ -723,7 +789,7 @@ export class SurfaceSwitchCoordinator {
   private async closeTarget(transaction: SwitchTransaction): Promise<boolean> {
     try {
       return transaction.target === 'floating'
-        ? await this.options.operations.closeFloating()
+        ? await this.options.operations.closeFloating(transaction.targetIdentity)
         : await this.options.operations.closeSidePanel(transaction.sourceWindowId);
     } catch {
       return false;
@@ -803,7 +869,7 @@ export class SurfaceSwitchCoordinator {
       try {
         const closed = active.transaction.source === 'sidepanel'
           ? await this.options.operations.closeSidePanel(active.transaction.sourceWindowId)
-          : await this.options.operations.closeFloating();
+          : await this.options.operations.closeFloating(active.transaction.sourceIdentity);
         return closed ? 'closed' : 'close-failed';
       } catch {
         return 'close-failed';
@@ -878,6 +944,8 @@ export class SurfaceSwitchCoordinator {
       ? active.durableMarkerPersisted
         ? active.durableClearRetriesRemaining
         : active.durableMarkerRetriesRemaining
+      : active.transaction.phase === 'rolling-back-mode' && active.phasePersisted
+        ? active.modeRollbackRetriesRemaining
       : active.phasePersisted
         ? active.targetCloseRetriesRemaining
         : active.phasePersistRetriesRemaining;
@@ -886,7 +954,12 @@ export class SurfaceSwitchCoordinator {
       || active.targetCleanupTimer !== undefined
       || retriesRemaining <= 0
     ) return;
-    if (!durablePhase && active.phasePersisted) active.targetCloseRetriesRemaining -= 1;
+    if (
+      !durablePhase
+      && active.transaction.phase === 'rolling-back-mode'
+      && active.phasePersisted
+    ) active.modeRollbackRetriesRemaining -= 1;
+    else if (!durablePhase && active.phasePersisted) active.targetCloseRetriesRemaining -= 1;
     else if (!durablePhase) active.phasePersistRetriesRemaining -= 1;
     else if (active.durableMarkerPersisted) active.durableClearRetriesRemaining -= 1;
     else active.durableMarkerRetriesRemaining -= 1;

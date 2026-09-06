@@ -596,6 +596,10 @@ describe('worker boundary: real popup clients against the real listener', () => 
       transaction: expect.objectContaining({
         switchId: 'switch-return',
         sourceWindowId: 77,
+        sourceIdentity: {
+          hostWindowId: host.windowId,
+          sessionId: 'pip-live',
+        },
       }),
     });
     await expect(fake.dispatch({
@@ -624,6 +628,46 @@ describe('worker boundary: real popup clients against the real listener', () => 
     expect(fake.navigationCalls.filter((call) => (
       (call as { update?: unknown }).update as { state?: string } | undefined
     )?.state === 'normal')).toHaveLength(restoreCount);
+  });
+
+  it('keeps a replacement PiP host when startup reconciles an older closing-source', async () => {
+    const replacementSession = {
+      sessionId: 'pip-replacement',
+      hostWindowId: 901,
+      phase: 'ready',
+    };
+    const fake = await startWorker({
+      initialFloatWindowId: 901,
+      initialSession: {
+        [FLOAT_WINDOW_ID_SESSION_KEY]: 901,
+        [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 88,
+        [PIP_SESSION_STORAGE_KEY]: replacementSession,
+        [SURFACE_SWITCH_STORAGE_KEY]: {
+          switchId: 'old-return-cleanup',
+          source: 'floating',
+          target: 'sidepanel',
+          sourceWindowId: 77,
+          sourceIdentity: { hostWindowId: 900, sessionId: 'pip-original' },
+          phase: 'closing-source',
+          startedAt: 0,
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(fake.sessionRecords[SURFACE_SWITCH_STORAGE_KEY]).toMatchObject({
+      phase: 'closing-source',
+    }));
+    await expect(fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.bootstrap',
+      payload: { surface: 'sidepanel', windowId: 88 },
+    }, POPUP_SENDER)).resolves.toEqual({ ok: true });
+    expect(fake.sessionRecords).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: 901,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 88,
+      [PIP_SESSION_STORAGE_KEY]: replacementSession,
+      [SURFACE_SWITCH_STORAGE_KEY]: null,
+    });
   });
 
   it('closes a timed-out side-panel target in the floating window owner', async () => {
@@ -771,6 +815,17 @@ describe('worker boundary: real popup clients against the real listener', () => 
       type: 'surface.switch.started',
       payload: { switchId: 'switch-to-floating', target: 'floating' },
     }));
+    await expect(fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.bootstrap',
+      payload: { surface: 'floating', windowId: 900 },
+    }, POPUP_SENDER)).resolves.toEqual({
+      ok: true,
+      transaction: expect.objectContaining({
+        switchId: 'switch-to-floating',
+        targetIdentity: { hostWindowId: 900 },
+      }),
+    });
     await fake.dispatch({
       protocolVersion: 1,
       type: 'surface.ready',

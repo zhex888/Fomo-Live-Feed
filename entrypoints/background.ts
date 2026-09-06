@@ -262,14 +262,19 @@ export default defineBackground(() => {
   ).chrome ?? browser as unknown as ChromeWithOptionalSidePanel;
   const surfaceSwitchCoordinator = new SurfaceSwitchCoordinator({
     operations: {
-      openFloating: async (ownerWindowId) => (
-        await floatWindowManager.openOrFocus(ownerWindowId)
-      ).ok,
+      openFloating: async (ownerWindowId) => {
+        const result = await floatWindowManager.openOrFocus(ownerWindowId);
+        return result.ok ? result.windowId : false;
+      },
       openSidePanel: (sourceWindowId) => openSidePanelForWindow(
         floatWindowManager.cachedOwnerWindowId() ?? sourceWindowId,
         sidePanelChrome,
       ),
-      closeFloating: () => floatWindowManager.close(),
+      closeFloating: (expected) => expected === undefined
+        ? floatWindowManager.close()
+        : 'sessionId' in expected
+          ? floatWindowManager.closeExpectedPip(expected.hostWindowId, expected.sessionId)
+          : floatWindowManager.closeExpectedWindow(expected.hostWindowId),
       closeSidePanel: (sourceWindowId) => closeSidePanelForWindow(
         floatWindowManager.cachedOwnerWindowId() ?? sourceWindowId,
         sidePanelChrome,
@@ -938,6 +943,7 @@ export default defineBackground(() => {
             source: 'floating',
             target: 'sidepanel',
             sourceWindowId: ownerWindowId,
+            sourceIdentity: { hostWindowId, sessionId },
           });
           void result.then(broadcastSurfaceSwitchChanged).catch(() => {});
           return result;
