@@ -662,10 +662,11 @@ export default defineBackground(() => {
   };
 
   const bootstrap = async (): Promise<void> => {
+    const restoreSurfaceSwitch = surfaceSwitchCoordinator.restore();
     // Hydrate persisted capability caches without delaying listener setup.
     // A trusted float host can supply its issued context while this is pending,
     // preserving Chrome's synchronous user-activation boundary.
-    await hydratePipRuntimeState();
+    await Promise.all([hydratePipRuntimeState(), restoreSurfaceSwitch]);
 
     // Seed the display mode before wiring the action behavior so the action
     // routes to the right surface from the very first click.
@@ -932,7 +933,7 @@ export default defineBackground(() => {
             };
           }
 
-          const result = surfaceSwitchCoordinator.request({
+          const result = surfaceSwitchCoordinator.requestTrustedWhileRestoring({
             switchId,
             source: 'floating',
             target: 'sidepanel',

@@ -11,6 +11,7 @@ import {
   PIP_SESSION_STORAGE_KEY,
   FloatWindowManager,
 } from '../../src/background/float-window';
+import { SURFACE_SWITCH_STORAGE_KEY } from '../../src/background/surface-switch-coordinator';
 import type { MessageSenderLike } from '../../src/messaging/guards';
 import { popupConnectionState } from '../../src/popup/event-query';
 import {
@@ -414,6 +415,7 @@ async function startWorker(
     initialFloatWindowId?: number;
     onSidePanelOpen?: (windowId: number) => void;
     rejectSidePanelOpen?: boolean;
+    skipBootstrapWait?: boolean;
   } = {},
 ) {
   const fake = createFakeBrowser(options);
@@ -439,7 +441,9 @@ async function startWorker(
 
   // Let bootstrap (badge refresh, retention seed, suppression warm) settle
   // before dispatching worker messages.
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!options.skipBootstrapWait) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 
   return fake;
 }
@@ -650,6 +654,38 @@ describe('worker boundary: real popup clients against the real listener', () => 
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not open a generic target before startup restores its cleanup barrier', async () => {
+    const fake = await startWorker({
+      skipBootstrapWait: true,
+      initialSession: {
+        [SURFACE_SWITCH_STORAGE_KEY]: {
+          switchId: 'stored-cleanup-barrier',
+          source: 'floating',
+          target: 'sidepanel',
+          sourceWindowId: 77,
+          phase: 'closing-target',
+          startedAt: Date.now(),
+        },
+      },
+    });
+
+    await expect(fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.switch.request',
+      payload: {
+        switchId: 'immediate-generic-request',
+        source: 'floating',
+        target: 'sidepanel',
+        sourceWindowId: 900,
+      },
+    }, POPUP_SENDER)).resolves.toEqual({
+      ok: false,
+      switchId: 'immediate-generic-request',
+      reason: 'switch-in-progress',
+    });
+    expect(fake.sidePanelOpenCalls).toEqual([]);
   });
 
   it('rejects a stale return token before opening the side panel', async () => {
