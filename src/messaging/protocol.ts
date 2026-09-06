@@ -381,6 +381,10 @@ export const extensionMessageSchema = z.discriminatedUnion('type', [
   }).strict(),
   z.object({
     protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('capture.ping'),
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
     type: z.literal('navigation.openToken'),
     payload: openTokenPayloadSchema,
   }).strict(),
@@ -583,6 +587,7 @@ const KNOWN_MESSAGE_TYPES = [
   'surface.bootstrap',
   'surface.ready',
   'surface.switch.changed',
+  'capture.ping',
   'navigation.openToken',
   'translation.request',
   'translation.ready',

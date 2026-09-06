@@ -39,6 +39,10 @@ import {
   type SyncQueryResponse,
 } from '../src/messaging/protocol';
 import { SurfaceSwitchCoordinator } from '../src/background/surface-switch-coordinator';
+import {
+  CaptureRecovery,
+  type CaptureRecoveryTabs,
+} from '../src/background/capture-recovery';
 import { FomoFeedDatabase } from '../src/storage/database';
 import {
   EventRepository,
@@ -213,6 +217,18 @@ export default defineBackground(() => {
   const floatWindowManager = new FloatWindowManager(floatWindowChrome, {
     session: sessionStorage,
     local: storageLocal,
+  });
+  const captureRecovery = new CaptureRecovery({
+    tabs: {
+      query: async (query) => (await browser.tabs.query(query)).map((tab) => ({
+        ...(tab.id === undefined ? {} : { id: tab.id }),
+        ...(tab.lastAccessed === undefined ? {} : { lastAccessed: tab.lastAccessed }),
+      })),
+      reload: (tabId) => browser.tabs.reload(tabId),
+      create: (options) => browser.tabs.create(options),
+      sendMessage: (tabId, message) => browser.tabs.sendMessage(tabId, message),
+    } satisfies CaptureRecoveryTabs,
+    storage: sessionStorage,
   });
 
   /**
@@ -787,6 +803,7 @@ export default defineBackground(() => {
             return result;
           });
         case 'surface.bootstrap':
+          void captureRecovery.ensureCapture('surface-open').catch(() => {});
           return surfaceSwitchCoordinator.bootstrap(message.payload.surface).then(
             (transaction) => ({
               ok: true as const,

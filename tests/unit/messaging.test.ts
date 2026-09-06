@@ -880,6 +880,7 @@ describe('guards', () => {
       expect(trustClassForMessageType('sync.changed')).toBeNull();
       expect(trustClassForMessageType('sound.playBuy')).toBeNull();
       expect(trustClassForMessageType('surface.switch.changed')).toBeNull();
+      expect(trustClassForMessageType('capture.ping')).toBeNull();
     });
 
     it('rejects sound.playBuy as an inbound worker message', () => {
