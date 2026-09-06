@@ -270,7 +270,10 @@ export default defineBackground(() => {
         sidePanelChrome,
       ),
       closeFloating: () => floatWindowManager.close(),
-      closeSidePanel: (windowId) => closeSidePanelForWindow(windowId, sidePanelChrome),
+      closeSidePanel: (sourceWindowId) => closeSidePanelForWindow(
+        floatWindowManager.cachedOwnerWindowId() ?? sourceWindowId,
+        sidePanelChrome,
+      ),
       saveDisplayMode: async (mode) => {
         await preferences.updateSettings({ displayMode: mode });
         currentDisplayMode = mode;

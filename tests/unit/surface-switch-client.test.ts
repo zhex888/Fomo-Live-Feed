@@ -65,6 +65,44 @@ describe('createSurfaceSwitchClient', () => {
       .rejects.toThrow('Invalid surface.ready response');
   });
 
+  it('accepts the strict target cleanup failure response', async () => {
+    const client = createSurfaceSwitchClient({
+      sendMessage: vi.fn(async () => ({
+        ok: false,
+        switchId: 'switch-1',
+        reason: 'target-close-failed',
+      })),
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    });
+
+    await expect(client.ready('switch-1', 'floating', 12)).resolves.toEqual({
+      ok: false,
+      switchId: 'switch-1',
+      reason: 'target-close-failed',
+    });
+  });
+
+  it('accepts a strict closing-target bootstrap transaction', async () => {
+    const client = createSurfaceSwitchClient({
+      sendMessage: vi.fn(async () => ({
+        ok: true,
+        transaction: {
+          switchId: 'switch-1',
+          source: 'floating',
+          target: 'sidepanel',
+          sourceWindowId: 7,
+          phase: 'closing-target',
+          startedAt: 900,
+        },
+      })),
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    }, () => 1_000);
+
+    await expect(client.bootstrap('sidepanel', 7)).resolves.toMatchObject({
+      transaction: { phase: 'closing-target' },
+    });
+  });
+
   it('rejects malformed switch and bootstrap responses', async () => {
     const sendMessage = vi.fn(async (message: unknown) => (
       (message as { type: string }).type === 'surface.bootstrap'

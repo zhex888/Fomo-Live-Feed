@@ -50,6 +50,7 @@ export type SurfaceKey = (typeof SURFACE_KEYS)[number];
 export const SURFACE_SWITCH_FAILURES = [
   'switch-in-progress',
   'target-open-failed',
+  'target-close-failed',
   'target-ready-timeout',
   'stale-switch',
   'source-close-failed',

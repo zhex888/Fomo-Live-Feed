@@ -158,6 +158,7 @@ function createFakeBrowser(options: {
   const healthChanges: unknown[] = [];
   const navigationCalls: unknown[] = [];
   const sidePanelOpenCalls: number[] = [];
+  const sidePanelCloseCalls: number[] = [];
   let listener: ((message: unknown, sender: unknown) => unknown) | null = null;
   let removedListener: ((tabId: number) => void) | null = null;
   let updatedListener: ((tabId: number, changeInfo: { url?: string; status?: string }) => void) | null = null;
@@ -179,7 +180,9 @@ function createFakeBrowser(options: {
         options.onSidePanelOpen?.(windowId);
         if (options.rejectSidePanelOpen) throw new Error('side panel open failed');
       },
-      async close(): Promise<void> {},
+      async close({ windowId }): Promise<void> {
+        sidePanelCloseCalls.push(windowId);
+      },
     },
     runtime: {
       id: EXTENSION_ID,
@@ -328,6 +331,7 @@ function createFakeBrowser(options: {
     healthChanges,
     navigationCalls,
     sidePanelOpenCalls,
+    sidePanelCloseCalls,
     blockLifecycleHydration(): void {
       hydrationGate = new Promise<void>((resolve) => {
         releaseHydrationGate = resolve;
@@ -612,6 +616,40 @@ describe('worker boundary: real popup clients against the real listener', () => 
     expect(fake.navigationCalls.filter((call) => (
       (call as { update?: unknown }).update as { state?: string } | undefined
     )?.state === 'normal')).toHaveLength(restoreCount);
+  });
+
+  it('closes a timed-out side-panel target in the floating window owner', async () => {
+    const fake = await startWorker({
+      initialFloatWindowId: 900,
+      initialSession: {
+        [FLOAT_WINDOW_ID_SESSION_KEY]: 900,
+        [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+      },
+    });
+    vi.useFakeTimers();
+    try {
+      const returned = fake.dispatch({
+        protocolVersion: 1,
+        type: 'surface.switch.request',
+        payload: {
+          switchId: 'timed-out-owner-return',
+          source: 'floating',
+          target: 'sidepanel',
+          sourceWindowId: 900,
+        },
+      }, POPUP_SENDER);
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(returned).resolves.toEqual({
+        ok: false,
+        switchId: 'timed-out-owner-return',
+        reason: 'target-ready-timeout',
+      });
+      expect(fake.sidePanelOpenCalls).toEqual([77]);
+      expect(fake.sidePanelCloseCalls).toEqual([77]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects a stale return token before opening the side panel', async () => {
