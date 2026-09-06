@@ -200,6 +200,19 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function hydratedActivationButton(): Promise<HTMLButtonElement> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  const button = screen.getByRole<HTMLButtonElement>('button', {
+    name: 'Keep floating window on top',
+  });
+  expect(button).toBeEnabled();
+  return button;
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -258,6 +271,83 @@ describe('SidePanelApp float surface', () => {
 });
 
 describe('FloatingSurfaceHost', () => {
+  it('keeps activation locked until persisted PiP geometry is hydrated', async () => {
+    const harness = createHarness('floatpanel');
+    const geometryRead = deferred<Record<string, unknown>>();
+    const originalGet = harness.deps.storage.local.get.bind(harness.deps.storage.local);
+    harness.deps.storage.local.get = vi.fn((keys: string[]) => (
+      keys.includes(PIP_GEOMETRY_STORAGE_KEY)
+        ? geometryRead.promise
+        : originalGet(keys)
+    ));
+    const requestWindow = vi.fn(() => new Promise<Window>(() => {}));
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow }}
+      />,
+    );
+
+    const activate = screen.getByRole('button', {
+      name: 'Keep floating window on top',
+    });
+    expect(activate).toBeDisabled();
+    fireEvent.click(activate);
+    expect(requestWindow).not.toHaveBeenCalled();
+
+    await act(async () => {
+      geometryRead.resolve({
+        [PIP_GEOMETRY_STORAGE_KEY]: { width: 524, height: 718 },
+      });
+      await geometryRead.promise;
+    });
+    await waitFor(() => expect(activate).toBeEnabled());
+    fireEvent.click(activate);
+
+    expect(requestWindow).toHaveBeenCalledWith({
+      width: 524,
+      height: 718,
+      disallowReturnToOpener: true,
+    });
+  });
+
+  it('unlocks activation with the default geometry after hydration fails', async () => {
+    const harness = createHarness('floatpanel');
+    const geometryRead = deferred<Record<string, unknown>>();
+    const originalGet = harness.deps.storage.local.get.bind(harness.deps.storage.local);
+    harness.deps.storage.local.get = vi.fn((keys: string[]) => (
+      keys.includes(PIP_GEOMETRY_STORAGE_KEY)
+        ? geometryRead.promise
+        : originalGet(keys)
+    ));
+    const requestWindow = vi.fn(() => new Promise<Window>(() => {}));
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow }}
+      />,
+    );
+    const activate = screen.getByRole('button', {
+      name: 'Keep floating window on top',
+    });
+    expect(activate).toBeDisabled();
+
+    await act(async () => {
+      geometryRead.reject(new Error('storage unavailable'));
+      await geometryRead.promise.catch(() => {});
+    });
+    await waitFor(() => expect(activate).toBeEnabled());
+    fireEvent.click(activate);
+
+    expect(requestWindow).toHaveBeenCalledWith({
+      width: 380,
+      height: 600,
+      disallowReturnToOpener: true,
+    });
+  });
+
   it('uses the persisted PiP content size without delaying the activation click', async () => {
     const harness = createHarness('floatpanel');
     harness.seedStored(PIP_GEOMETRY_STORAGE_KEY, { width: 524, height: 718 });
@@ -271,7 +361,7 @@ describe('FloatingSurfaceHost', () => {
     );
 
     await waitFor(() => expect(screen.getByText('Connected')).toBeVisible());
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
 
     expect(requestWindow).toHaveBeenCalledWith({
       width: 524,
@@ -303,10 +393,7 @@ describe('FloatingSurfaceHost', () => {
         mountPipFeed={mountPipFeed}
       />,
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
-      await Promise.resolve();
-    });
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(feedReady).toBeDefined());
     await act(async () => {
       feedReady?.(0);
@@ -334,6 +421,58 @@ describe('FloatingSurfaceHost', () => {
       width: 612,
       height: 744,
       disallowReturnToOpener: true,
+    });
+  });
+
+  it('flushes the last clamped resize when native close beats the debounce', async () => {
+    vi.useFakeTimers();
+    const harness = createHarness('floatpanel');
+    const pip = createPipWindow();
+    Object.defineProperties(pip.pipWindow, {
+      innerWidth: { configurable: true, writable: true, value: 120 },
+      innerHeight: { configurable: true, writable: true, value: 4_000 },
+    });
+    let feedReady: ((eventWatermark: number) => void) | undefined;
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{
+          window: null,
+          requestWindow: () => Promise.resolve(pip.pipWindow),
+        }}
+        mountPipFeed={(options) => {
+          feedReady = options.onFeedReady;
+          return vi.fn();
+        }}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(await hydratedActivationButton());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => feedReady?.(0));
+    pip.pipWindow.dispatchEvent(new Event('resize'));
+
+    act(() => pip.dispatchPageHide());
+    await act(async () => { await Promise.resolve(); });
+    expect(harness.readStored(PIP_GEOMETRY_STORAGE_KEY)).toEqual({
+      width: 320,
+      height: 1_200,
+    });
+
+    Object.defineProperties(pip.pipWindow, {
+      innerWidth: { configurable: true, writable: true, value: 900 },
+      innerHeight: { configurable: true, writable: true, value: 900 },
+    });
+    pip.pipWindow.dispatchEvent(new Event('resize'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(harness.readStored(PIP_GEOMETRY_STORAGE_KEY)).toEqual({
+      width: 320,
+      height: 1_200,
     });
   });
 
@@ -370,7 +509,8 @@ describe('FloatingSurfaceHost', () => {
 
     expect(document.querySelector('.sidepanel-root')).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Keep floating window on top' }))
-      .toBeEnabled();
+      .toBeDisabled();
+    await hydratedActivationButton();
     await screen.findByText('Connected');
   });
 
@@ -474,7 +614,6 @@ describe('FloatingSurfaceHost', () => {
     const harness = createHarness('floatpanel');
     const pending = deferred<Window>();
     const requestWindow = vi.fn(() => pending.promise);
-    const buttonName = 'Keep floating window on top';
 
     render(
       <FloatingSurfaceHost
@@ -485,7 +624,7 @@ describe('FloatingSurfaceHost', () => {
 
     await screen.findByText('Connected');
 
-    const button = screen.getByRole('button', { name: buttonName });
+    const button = await hydratedActivationButton();
     fireEvent.click(button);
     fireEvent.click(button);
 
@@ -514,7 +653,7 @@ describe('FloatingSurfaceHost', () => {
         />
       </StrictMode>,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
 
     await waitFor(() => expect(mountPipFeed).toHaveBeenCalledTimes(1));
     expect(document.querySelector('.sidepanel-root')).not.toBeNull();
@@ -545,7 +684,7 @@ describe('FloatingSurfaceHost', () => {
         createSessionId={() => 'session-with-owner'}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(mountedFeed).toBeDefined());
 
     await act(async () => {
@@ -602,7 +741,7 @@ describe('FloatingSurfaceHost', () => {
         createSessionId={() => 'recoverable-session'}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(mountedFeed).toBeDefined());
 
     await expect(mountedFeed!.onReturnToSidePanel()).resolves.toBe(false);
@@ -631,7 +770,7 @@ describe('FloatingSurfaceHost', () => {
         mountPipFeed={mountPipFeed}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
 
     expect(await screen.findByRole('button', {
       name: 'Reopen always-on-top window',
@@ -680,7 +819,7 @@ describe('FloatingSurfaceHost', () => {
       />,
     );
     await screen.findByText('Connected');
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(harness.sentMessages().filter(
       (message) => (message as { type?: string }).type === 'events.markRead',
     )).toHaveLength(1));
@@ -708,7 +847,7 @@ describe('FloatingSurfaceHost', () => {
         createSessionId={() => 'session-close'}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(mountPipFeed).toHaveBeenCalledTimes(1));
 
     act(() => pip.dispatchPageHide());
@@ -741,7 +880,7 @@ describe('FloatingSurfaceHost', () => {
         }}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(mountedFeed).toBeDefined());
     act(() => mountedFeed?.onFeedReady(12));
     await waitFor(() => expect(harness.sentMessages()).toContainEqual(
@@ -778,7 +917,7 @@ describe('FloatingSurfaceHost', () => {
         mountPipFeed={mountPipFeed}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(getCurrentWindowId).toHaveBeenCalledTimes(1));
     act(() => pip.dispatchPageHide());
     hostWindowId.resolve(27);
@@ -815,7 +954,7 @@ describe('FloatingSurfaceHost', () => {
         mountPipFeed={mountPipFeed}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
 
     await waitFor(() => expect(cleanup).toHaveBeenCalledTimes(1));
   });
@@ -835,7 +974,7 @@ describe('FloatingSurfaceHost', () => {
         mountPipFeed={mountPipFeed}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(harness.sentMessages()).toContainEqual(
       expect.objectContaining({ type: 'pip.opened' }),
     ));
@@ -883,7 +1022,7 @@ describe('FloatingSurfaceHost', () => {
         />
       </StrictMode>,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(openedCalls).toBe(1));
 
     act(() => firstPip.dispatchPageHide());
@@ -920,7 +1059,7 @@ describe('FloatingSurfaceHost', () => {
         mountPipFeed={mountPipFeed}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(mountPipFeed).toHaveBeenCalledTimes(1));
 
     view.unmount();
@@ -948,7 +1087,7 @@ describe('FloatingSurfaceHost', () => {
         mountPipFeed={() => vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
 
     expect(await screen.findByRole('button', { name: 'Try again' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -970,7 +1109,7 @@ describe('FloatingSurfaceHost', () => {
         createSessionId={() => 'session-mount-failed'}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
 
     expect(await screen.findByRole('button', { name: 'Try again' })).toBeEnabled();
     expect(harness.sentMessages()).toContainEqual({
@@ -1022,7 +1161,7 @@ describe('FloatingSurfaceHost', () => {
           createSessionId={() => `ready-failure-${requestWindow.mock.calls.length}`}
         />,
       );
-      fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
       await waitFor(() => expect(mountPipFeed).toHaveBeenCalledTimes(1));
 
       act(() => mountedFeeds[0]?.onFeedReady(88));
@@ -1060,7 +1199,7 @@ describe('FloatingSurfaceHost', () => {
         }}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    fireEvent.click(await hydratedActivationButton());
     await waitFor(() => expect(mountedFeed).toBeDefined());
 
     act(() => mountedFeed?.onFeedReady(99));

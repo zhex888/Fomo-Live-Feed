@@ -133,6 +133,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   const [childMayBeLive, setChildMayBeLive] = useState(false);
   const [childOwnsRead, setChildOwnsRead] = useState(false);
   const [activationPending, setActivationPending] = useState(false);
+  const [geometryHydrated, setGeometryHydrated] = useState(false);
   const theme = useSurfaceTheme(deps);
   const pipGeometryRef = useRef<PipGeometry>({ ...DEFAULT_PIP_GEOMETRY });
   const sessionRef = useRef<ActiveSession | undefined>(undefined);
@@ -154,9 +155,13 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
 
   useEffect(() => {
     let disposed = false;
+    pipGeometryRef.current = { ...DEFAULT_PIP_GEOMETRY };
+    setGeometryHydrated(false);
     void readPipGeometry(deps.storage.local).then((geometry) => {
       if (!disposed) pipGeometryRef.current = geometry;
-    }).catch(() => {});
+    }).catch(() => {}).then(() => {
+      if (!disposed) setGeometryHydrated(true);
+    });
     return () => { disposed = true; };
   }, [deps.storage.local]);
   const finalizeSession = (
@@ -385,7 +390,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
   ), [api, deps, props.hostDocument, props.mountPipFeed, surfaceSwitchClient, translate]);
 
   const activate = useCallback((): void => {
-    if (activationInFlightRef.current) return;
+    if (!geometryHydrated || activationInFlightRef.current) return;
     activationInFlightRef.current = true;
     const session: ActiveSession = {
       id: props.createSessionId?.() ?? newId('pip'),
@@ -415,7 +420,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
         setState(result.reason === 'unsupported' ? 'unsupported' : 'error');
       }
     });
-  }, [controller, props.createSessionId]);
+  }, [controller, geometryHydrated, props.createSessionId]);
 
   const busy = activationPending
     || state === 'opening'
@@ -459,7 +464,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
             <button
               type="button"
               className="floating-primary-action"
-              disabled={busy}
+              disabled={busy || !geometryHydrated}
               aria-busy={busy ? 'true' : undefined}
               onClick={activate}
             >
