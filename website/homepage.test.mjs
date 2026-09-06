@@ -40,10 +40,10 @@ test('links to the public GitHub repository from navigation and footer', () => {
 
 test('presents a changelog section with one item per released version', () => {
   assert.match(html, /class="updates shell" id="updates"/);
-  assert.equal((html.match(/class="release-item"/g) ?? []).length, 3);
-  assert.equal((html.match(/class="version-tag"/g) ?? []).length, 3);
-  assert.equal((html.match(/class="release-link"/g) ?? []).length, 3);
-  for (const version of ['v0.3.0', 'v0.2.0', 'v0.1.0']) {
+  assert.equal((html.match(/class="release-item"/g) ?? []).length, 4);
+  assert.equal((html.match(/class="version-tag"/g) ?? []).length, 4);
+  assert.equal((html.match(/class="release-link"/g) ?? []).length, 4);
+  for (const version of ['v0.4.0', 'v0.3.0', 'v0.2.0', 'v0.1.0']) {
     assert.match(html, new RegExp(`releases/tag/${version}`));
   }
 });
@@ -59,9 +59,16 @@ test('includes the Chrome developer mode installation step', () => {
 
 test('labels sample data and describes the ZIP download accurately', () => {
   assert.match(html, /示例界面/);
-  assert.match(html, /下载 v0\.3\.0 ZIP/);
+  assert.match(html, /下载 v0\.4\.0 ZIP/);
   assert.match(html, /开源代码/);
   assert.match(html, /SHA-256/);
+});
+
+test('downloads the current v0.4.0 Chrome package', () => {
+  assert.match(
+    script,
+    /releases\/download\/v0\.4\.0\/Fomo-Live-Feed-v0\.4\.0-chrome\.zip/,
+  );
 });
 
 test('the product demo exposes three accessible tabs', () => {
