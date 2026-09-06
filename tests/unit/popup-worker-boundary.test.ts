@@ -11,7 +11,10 @@ import {
   PIP_SESSION_STORAGE_KEY,
   FloatWindowManager,
 } from '../../src/background/float-window';
-import { SURFACE_SWITCH_STORAGE_KEY } from '../../src/background/surface-switch-coordinator';
+import {
+  SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY,
+  SURFACE_SWITCH_STORAGE_KEY,
+} from '../../src/background/surface-switch-coordinator';
 import type { MessageSenderLike } from '../../src/messaging/guards';
 import { popupConnectionState } from '../../src/popup/event-query';
 import {
@@ -737,6 +740,11 @@ describe('worker boundary: real popup clients against the real listener', () => 
       await fake.dispatch({
         protocolVersion: 1,
         type: 'surface.bootstrap',
+        payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'stale-existing-panel' },
+      }, POPUP_SENDER);
+      await fake.dispatch({
+        protocolVersion: 1,
+        type: 'surface.bootstrap',
         payload: { surface: 'floating', windowId: 900, instanceToken: 'float-timeout' },
       }, POPUP_SENDER);
       const returned = fake.dispatch({
@@ -759,6 +767,15 @@ describe('worker boundary: real popup clients against the real listener', () => 
       });
       expect(fake.sidePanelOpenCalls).toEqual([77]);
       expect(fake.sidePanelCloseCalls).toEqual([]);
+      await expect(fake.dispatch({
+        protocolVersion: 1,
+        type: 'surface.bootstrap',
+        payload: { surface: 'sidepanel', windowId: 88, instanceToken: 'stale-panel' },
+      }, POPUP_SENDER)).resolves.toEqual({ ok: true });
+      expect(fake.sidePanelCloseCalls).toEqual([]);
+      expect(fake.sessionRecords[SURFACE_SWITCH_STORAGE_KEY]).toMatchObject({
+        targetIdentity: { hostWindowId: 77 },
+      });
       await expect(fake.dispatch({
         protocolVersion: 1,
         type: 'surface.bootstrap',
@@ -1161,6 +1178,99 @@ describe('worker boundary: real popup clients against the real listener', () => 
       },
     }, POPUP_SENDER);
     await expect(returned).resolves.toEqual({ ok: true, switchId: 'switch-cold-return' });
+  });
+
+  it('binds a cold rejected pre-open before reconciling its detached cleanup', async () => {
+    const fake = await startWorker({
+      initialFloatWindowId: 900,
+      initialSession: {
+        [FLOAT_WINDOW_ID_SESSION_KEY]: 900,
+        [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+        [PIP_SESSION_STORAGE_KEY]: {
+          sessionId: 'pip-detached',
+          hostWindowId: 900,
+          phase: 'ready',
+        },
+      },
+    });
+    fake.sessionRecords[SURFACE_SWITCH_STORAGE_KEY] = {
+      switchId: 'existing-completed-cleanup',
+      source: 'floating',
+      target: 'sidepanel',
+      sourceWindowId: 66,
+      targetIdentity: { hostWindowId: 66, instanceToken: 'old-panel' },
+      phase: 'target-closed',
+      startedAt: Date.now(),
+    };
+    fake.blockLifecycleHydration();
+    workerSetup?.();
+
+    const first = fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.returnToSidePanel',
+      payload: {
+        sessionId: 'pip-detached',
+        hostWindowId: 900,
+        ownerWindowId: 77,
+        switchId: 'cold-rejected-pre-open',
+      },
+    }, floatHostSender(900));
+    expect(fake.sidePanelOpenCalls).toEqual([77]);
+    fake.releaseLifecycleHydration();
+
+    await expect(first).resolves.toEqual({
+      ok: false,
+      switchId: 'cold-rejected-pre-open',
+      reason: 'switch-in-progress',
+    });
+    expect(fake.sessionRecords[SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY]).toMatchObject({
+      targetIdentity: { hostWindowId: 77 },
+      phase: 'closing-target',
+    });
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.bootstrap',
+      payload: { surface: 'sidepanel', windowId: 88, instanceToken: 'unrelated-panel' },
+    }, POPUP_SENDER);
+    expect(fake.sidePanelCloseCalls).toEqual([]);
+
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.bootstrap',
+      payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'opened-panel' },
+    }, POPUP_SENDER);
+    expect(fake.sidePanelCloseCalls).toEqual([77]);
+    expect(fake.sessionRecords[SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY]).toBeNull();
+    await vi.waitFor(() => expect(fake.sessionRecords[SURFACE_SWITCH_STORAGE_KEY]).toBeNull());
+
+    const retry = fake.dispatch({
+      protocolVersion: 1,
+      type: 'pip.returnToSidePanel',
+      payload: {
+        sessionId: 'pip-detached',
+        hostWindowId: 900,
+        ownerWindowId: 77,
+        switchId: 'after-detached-cleanup',
+      },
+    }, floatHostSender(900));
+    expect(fake.sidePanelOpenCalls).toEqual([77, 77]);
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.bootstrap',
+      payload: { surface: 'sidepanel', windowId: 77, instanceToken: 'retry-panel' },
+    }, POPUP_SENDER);
+    await fake.dispatch({
+      protocolVersion: 1,
+      type: 'surface.ready',
+      payload: {
+        switchId: 'after-detached-cleanup',
+        surface: 'sidepanel',
+        eventWatermark: 0,
+        windowId: 77,
+        instanceToken: 'retry-panel',
+      },
+    }, POPUP_SENDER);
+    await expect(retry).resolves.toEqual({ ok: true, switchId: 'after-detached-cleanup' });
   });
 
   it('restores a matching PiP close when return-to-sidepanel opening fails', async () => {

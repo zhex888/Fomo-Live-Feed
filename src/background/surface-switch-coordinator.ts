@@ -273,6 +273,7 @@ function parseLegacyClosingSourceWithoutTarget(
     targetIdentity,
   }, now);
   if (parsed === undefined) return undefined;
+  if (parsed.target === 'floating') return undefined;
   const {
     targetIdentity: _targetIdentity,
     ...withoutTargetIdentity
@@ -447,7 +448,10 @@ export class SurfaceSwitchCoordinator {
       this.restoredOwnsDetachedCleanupKey = false;
       if (
         transaction.phase !== 'closing-target'
-        || transaction.targetIdentity !== undefined
+        || (
+          transaction.targetIdentity !== undefined
+          && hasInstanceToken(transaction.targetIdentity)
+        )
       ) this.scheduleTargetCleanup(active);
       return transaction;
     }
@@ -462,6 +466,7 @@ export class SurfaceSwitchCoordinator {
   ): Promise<SwitchTransaction | undefined> {
     if (this.detachedTargetCleanup?.transaction.target === surface) {
       const cleanup = this.detachedTargetCleanup;
+      if (!await this.bindDetachedPendingIdentity(cleanup, identity)) return undefined;
       const closed = await this.reconcileDetachedTargetCleanup(cleanup);
       if (!closed) return cleanup.transaction;
     }
@@ -469,6 +474,7 @@ export class SurfaceSwitchCoordinator {
       await this.restore();
       if (this.detachedTargetCleanup?.transaction.target === surface) {
         const cleanup = this.detachedTargetCleanup;
+        if (!await this.bindDetachedPendingIdentity(cleanup, identity)) return undefined;
         const closed = await this.reconcileDetachedTargetCleanup(cleanup);
         if (!closed) return cleanup.transaction;
       }
@@ -1165,6 +1171,13 @@ export class SurfaceSwitchCoordinator {
   }
 
   private scheduleTargetCleanup(active: ActiveSwitch): void {
+    if (
+      active.transaction.phase === 'closing-target'
+      && (
+        active.transaction.targetIdentity === undefined
+        || !hasInstanceToken(active.transaction.targetIdentity)
+      )
+    ) return;
     const durablePhase = active.transaction.phase === 'target-closed'
       || active.transaction.phase === 'source-closed';
     const retriesRemaining = durablePhase
@@ -1288,6 +1301,13 @@ export class SurfaceSwitchCoordinator {
   }
 
   private scheduleDetachedTargetCleanup(cleanup: DetachedTargetCleanup): void {
+    if (
+      cleanup.state === 'cleanup'
+      && (
+        cleanup.transaction.targetIdentity === undefined
+        || !hasInstanceToken(cleanup.transaction.targetIdentity)
+      )
+    ) return;
     const retriesRemaining = cleanup.state === 'clearing'
       ? cleanup.durableClearRetriesRemaining
       : cleanup.state === 'marking-closed'
@@ -1342,6 +1362,23 @@ export class SurfaceSwitchCoordinator {
       return false;
     }
     return this.markDetachedTargetClosed(cleanup);
+  }
+
+  private async bindDetachedPendingIdentity(
+    cleanup: DetachedTargetCleanup,
+    identity: SurfaceInstanceIdentity | undefined,
+  ): Promise<boolean> {
+    const expected = cleanup.transaction.targetIdentity;
+    if (expected === undefined || hasInstanceToken(expected)) return true;
+    if (identity === undefined || expected.hostWindowId !== identity.hostWindowId) return false;
+    cleanup.transaction.targetIdentity = { ...identity };
+    try {
+      await this.persistDetached(cleanup.transaction);
+      return true;
+    } catch {
+      cleanup.transaction.targetIdentity = expected;
+      return false;
+    }
   }
 
   private markDetachedTargetClosed(cleanup: DetachedTargetCleanup): Promise<boolean> {

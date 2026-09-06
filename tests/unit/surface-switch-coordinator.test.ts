@@ -480,6 +480,56 @@ describe('SurfaceSwitchCoordinator', () => {
     }
   });
 
+  it('waits for a pending side-panel identity without spending guarded close retries', async () => {
+    vi.useFakeTimers();
+    try {
+      const { coordinator, operations, storage } = createHarness({
+        timeoutMs: 10,
+        targetCloseRetryDelayMs: 20,
+        targetCloseRetryLimit: 1,
+      });
+      vi.mocked(operations.closeSidePanel)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const pending = coordinator.request({
+        switchId: 'pending-sidepanel-timeout',
+        source: 'floating',
+        target: 'sidepanel',
+        sourceWindowId: 9,
+        targetIdentity: { hostWindowId: 9 },
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(pending).resolves.toEqual({
+        ok: false,
+        switchId: 'pending-sidepanel-timeout',
+        reason: 'target-close-failed',
+      });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(operations.closeSidePanel).not.toHaveBeenCalled();
+
+      await expect(coordinator.bootstrap('sidepanel', {
+        hostWindowId: 10,
+        instanceToken: 'stale-other-panel',
+      })).resolves.toBeUndefined();
+      expect(operations.closeSidePanel).not.toHaveBeenCalled();
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toMatchObject({
+        targetIdentity: { hostWindowId: 9 },
+      });
+
+      await expect(coordinator.bootstrap('sidepanel', {
+        hostWindowId: 9,
+        instanceToken: 'late-real-panel',
+      })).resolves.toMatchObject({ phase: 'closing-target' });
+      expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(operations.closeSidePanel).toHaveBeenCalledTimes(2);
+      expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['opening', 'awaiting-ready'] as const)(
     'retains a cleanup barrier when %s persistence and target close fail',
     async (failedPhase) => {
@@ -1618,6 +1668,89 @@ describe('SurfaceSwitchCoordinator', () => {
     await expect(duplicate).resolves.toEqual(await first);
   });
 
+  it('binds a restored detached pending identity before guarded cleanup', async () => {
+    vi.useFakeTimers();
+    try {
+      const releaseGet = deferred<void>();
+      class DelayedGetStorage extends MemoryStorage {
+        override async get(keys: string[]): Promise<Record<string, unknown>> {
+          await releaseGet.promise;
+          return super.get(keys);
+        }
+      }
+      const storage = new DelayedGetStorage();
+      storage.values.set(SURFACE_SWITCH_STORAGE_KEY, {
+        switchId: 'existing-floating-cleanup',
+        source: 'sidepanel',
+        target: 'floating',
+        sourceWindowId: 9,
+        phase: 'closing-target',
+        startedAt: 0,
+        targetIdentity: { instanceToken: 'existing-float' },
+      });
+      const operations: SurfaceOperations = {
+        openFloating: vi.fn(async () => true),
+        openSidePanel: vi.fn(async () => true),
+        closeFloating: vi.fn(async () => true),
+        closeSidePanel: vi.fn(async () => true)
+          .mockResolvedValueOnce(false)
+          .mockResolvedValueOnce(true),
+        saveDisplayMode: vi.fn(async () => {}),
+      };
+      const coordinator = new SurfaceSwitchCoordinator({
+        operations,
+        storage,
+        now: () => 1_000,
+        targetCloseRetryDelayMs: 20,
+        targetCloseRetryLimit: 1,
+      });
+      const restoring = coordinator.restore();
+      const rejected = coordinator.requestTrustedWhileRestoring({
+        switchId: 'detached-pending-panel',
+        source: 'floating',
+        target: 'sidepanel',
+        sourceWindowId: 9,
+        targetIdentity: { hostWindowId: 9 },
+      });
+      releaseGet.resolve();
+
+      await restoring;
+      await expect(rejected).resolves.toMatchObject({ reason: 'switch-in-progress' });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(operations.closeSidePanel).not.toHaveBeenCalled();
+      await expect(coordinator.bootstrap('sidepanel', {
+        hostWindowId: 10,
+        instanceToken: 'unrelated-panel',
+      })).resolves.toBeUndefined();
+      expect(operations.closeSidePanel).not.toHaveBeenCalled();
+
+      await expect(coordinator.bootstrap('sidepanel', {
+        hostWindowId: 9,
+        instanceToken: 'opened-panel',
+      })).resolves.toMatchObject({ phase: 'closing-target' });
+      expect(operations.closeSidePanel).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(operations.closeSidePanel).toHaveBeenCalledTimes(2);
+      expect(storage.values.get(SURFACE_SWITCH_DETACHED_CLEANUP_STORAGE_KEY)).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(20);
+      const next = coordinator.request({ ...toFloating, switchId: 'after-detached-cleanup' });
+      await vi.waitFor(() => expect(operations.openFloating).toHaveBeenCalled());
+      await vi.waitFor(async () => expect(await coordinator.bootstrap('floating')).toMatchObject({
+        switchId: 'after-detached-cleanup',
+        phase: 'awaiting-ready',
+      }));
+      await coordinator.ready({
+        switchId: 'after-detached-cleanup',
+        surface: 'floating',
+        eventWatermark: 0,
+      });
+      await expect(next).resolves.toMatchObject({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('restores a persisted detached pre-open cleanup after worker restart', async () => {
     vi.useFakeTimers();
     try {
@@ -2484,6 +2617,45 @@ describe('SurfaceSwitchCoordinator', () => {
     });
     expect(operations.closeFloating).not.toHaveBeenCalled();
     expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+  });
+
+  it('non-destructively clears a legacy closing-source with an unidentifiable floating target', async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(SURFACE_SWITCH_STORAGE_KEY, {
+      switchId: 'legacy-floating-closing-source',
+      source: 'sidepanel',
+      target: 'floating',
+      sourceWindowId: 77,
+      sourceIdentity: { hostWindowId: 77, instanceToken: 'old-panel' },
+      phase: 'closing-source',
+      startedAt: 900,
+    });
+    const operations: SurfaceOperations = {
+      openFloating: vi.fn(async () => true),
+      openSidePanel: vi.fn(async () => true),
+      closeFloating: vi.fn(async () => true),
+      closeSidePanel: vi.fn(async () => true),
+      saveDisplayMode: vi.fn(async () => {}),
+    };
+    const coordinator = new SurfaceSwitchCoordinator({ operations, storage, now: () => 1_000 });
+
+    await expect(coordinator.restore()).resolves.toBeUndefined();
+    expect(operations.closeFloating).not.toHaveBeenCalled();
+    expect(operations.closeSidePanel).not.toHaveBeenCalled();
+    expect(storage.values.get(SURFACE_SWITCH_STORAGE_KEY)).toBeNull();
+
+    const next = coordinator.request({ ...toFloating, switchId: 'after-legacy-clear' });
+    await vi.waitFor(() => expect(operations.openFloating).toHaveBeenCalledOnce());
+    await vi.waitFor(async () => expect(await coordinator.bootstrap('floating')).toMatchObject({
+      switchId: 'after-legacy-clear',
+      phase: 'awaiting-ready',
+    }));
+    await coordinator.ready({
+      switchId: 'after-legacy-clear',
+      surface: 'floating',
+      eventWatermark: 0,
+    });
+    await expect(next).resolves.toMatchObject({ ok: true });
   });
 
   it('reconciles a restored floating open by its durable target generation', async () => {
