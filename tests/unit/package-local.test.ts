@@ -114,6 +114,7 @@ describe('local release packaging', () => {
       JSON.stringify({ manifest_version: 3, version: '0.1.0' }),
     );
     writeFileSync(join(output, 'sidepanel.html'), '<!doctype html>');
+    writeFileSync(join(output, 'floatpanel.html'), '<!doctype html>');
     writeFileSync(join(output, 'offscreen.html'), '<!doctype html>');
     writeFileSync(join(output, 'background.js'), 'export {};');
     mkdirSync(join(output, 'audio'), { recursive: true });
@@ -138,6 +139,7 @@ describe('local release packaging', () => {
       .trim()
       .split('\n');
     expect(entries).toContain('manifest.json');
+    expect(entries).toContain('floatpanel.html');
     expect(entries).toContain('offscreen.html');
     expect(entries).toContain('audio/buy-alert.wav');
     expect(entries).toContain('START-HERE.html');
@@ -147,7 +149,7 @@ describe('local release packaging', () => {
     );
   });
 
-  it.each(['offscreen.html', 'audio/buy-alert.wav'])(
+  it.each(['floatpanel.html', 'offscreen.html', 'audio/buy-alert.wav'])(
     'rejects a release missing %s',
     async (missingOutput) => {
       const root = mkdtempSync(join(tmpdir(), 'fomo-local-release-missing-'));
@@ -162,6 +164,7 @@ describe('local release packaging', () => {
         JSON.stringify({ manifest_version: 3, version: '0.1.0' }),
       );
       writeFileSync(join(output, 'sidepanel.html'), '<!doctype html>');
+      writeFileSync(join(output, 'floatpanel.html'), '<!doctype html>');
       writeFileSync(join(output, 'offscreen.html'), '<!doctype html>');
       writeFileSync(join(output, 'background.js'), 'export {};');
       writeFileSync(join(output, 'audio', 'buy-alert.wav'), 'audio');

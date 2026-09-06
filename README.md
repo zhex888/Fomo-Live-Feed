@@ -46,6 +46,9 @@ Fomo Live Feed 是一款 Chrome 扩展，通过 Chrome 右侧边栏展示当前 
   重复事件、卖出、观点、转入和转出不会触发。
 - **Fomo 快捷跳转**：点击代币名称可复用现有 Fomo 标签页并打开对应链和合约的
   代币页面；无法构造可靠目标时保持普通文本。
+- **悬浮窗模式（可选）**：设置中可将信息流从侧边栏切换为全局唯一的独立悬浮窗；
+  窗口可自由拖动和调整大小并记住尺寸，与侧边栏共享同一份数据，适合放在屏幕一角
+  或副屏盯盘。
 - **紧凑终端界面**：买入、卖出、观点等事件使用不同语义色边框；工具栏、筛选、
   设置、空状态和加载反馈采用统一的明暗主题设计，同时保持每屏信息密度。
 - **本地存储**：动态历史保存在 IndexedDB；设置与交易者标注保存在
@@ -153,6 +156,10 @@ To verify the download, get
   events.
 - **Fomo navigation:** Select a token symbol to reuse an existing Fomo tab and
   open the verified chain-and-contract route. Unverifiable targets remain text.
+- **Floating window (optional):** Switch the feed from the side panel to a
+  single global floating window in Settings. It is freely resizable, remembers
+  its size, and shares the same data as the side panel — handy for a screen
+  corner or a second monitor while trading.
 - **Compact terminal UI:** Semantic borders distinguish buy, sell, thesis, and
   transfer events. Toolbar, filters, settings, empty states, and loading
   feedback share one light/dark visual system without reducing feed density.

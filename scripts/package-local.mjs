@@ -18,6 +18,7 @@ const execFileAsync = promisify(execFile);
 const REQUIRED_OUTPUTS = [
   'manifest.json',
   'sidepanel.html',
+  'floatpanel.html',
   'offscreen.html',
   'background.js',
   'audio/buy-alert.wav',

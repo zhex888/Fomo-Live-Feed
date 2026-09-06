@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { TradeEventV1 } from '../../src/domain/activity';
 import { DiagnosticRecorder } from '../../src/background/diagnostics';
+import { FLOAT_GEOMETRY_STORAGE_KEY } from '../../src/background/float-window';
 import type { MessageSenderLike } from '../../src/messaging/guards';
 import { popupConnectionState } from '../../src/popup/event-query';
 import {
@@ -64,6 +65,7 @@ interface FakeBrowser {
   runtime: {
     id: string;
     sendMessage(message: unknown): Promise<unknown>;
+    getURL(path: string): string;
     onMessage: {
       addListener(listener: (message: unknown, sender: unknown) => unknown): void;
       removeListener(listener: (message: unknown, sender: unknown) => unknown): void;
@@ -96,10 +98,29 @@ interface FakeBrowser {
   windows: {
     getLastFocused(): Promise<{ id?: number }>;
     update(windowId: number, update: { focused: true }): Promise<unknown>;
+    get(windowId: number): Promise<{ id?: number }>;
+    create(create: unknown): Promise<{ id?: number }>;
+    onRemoved: {
+      addListener(listener: (windowId: number) => void): void;
+    };
+    onBoundsChanged: {
+      addListener(
+        listener: (window: {
+          id?: number;
+          width?: number;
+          height?: number;
+          left?: number;
+          top?: number;
+        }) => void,
+      ): void;
+    };
   };
   action: {
     setBadgeText(details: { text: string }): Promise<void>;
     setBadgeBackgroundColor(details: { color: string }): Promise<void>;
+    onClicked: {
+      addListener(listener: () => void): void;
+    };
   };
 }
 
@@ -117,6 +138,14 @@ function createFakeBrowser(options: {
   let listener: ((message: unknown, sender: unknown) => unknown) | null = null;
   let removedListener: ((tabId: number) => void) | null = null;
   let updatedListener: ((tabId: number, changeInfo: { url?: string; status?: string }) => void) | null = null;
+  let boundsChangedListener: ((window: {
+    id?: number;
+    width?: number;
+    height?: number;
+    left?: number;
+    top?: number;
+  }) => void) | null = null;
+  let floatWindowId: number | undefined;
 
   const browser: FakeBrowser = {
     runtime: {
@@ -124,6 +153,9 @@ function createFakeBrowser(options: {
       async sendMessage(message: unknown): Promise<unknown> {
         healthChanges.push(message);
         return undefined;
+      },
+      getURL(path: string): string {
+        return `chrome-extension://${EXTENSION_ID}/${path}`;
       },
       onMessage: {
         addListener(fn: (message: unknown, sender: unknown) => unknown): void {
@@ -211,6 +243,21 @@ function createFakeBrowser(options: {
         navigationCalls.push({ action: 'focus', windowId, update });
         return {};
       },
+      async get(windowId): Promise<{ id?: number }> {
+        return windowId === floatWindowId ? { id: windowId } : {};
+      },
+      async create(): Promise<{ id?: number }> {
+        floatWindowId = 900;
+        return { id: floatWindowId };
+      },
+      onRemoved: {
+        addListener(): void {},
+      },
+      onBoundsChanged: {
+        addListener(fn): void {
+          boundsChangedListener = fn;
+        },
+      },
     },
     action: {
       async setBadgeText(details: { text: string }): Promise<void> {
@@ -218,6 +265,9 @@ function createFakeBrowser(options: {
       },
       async setBadgeBackgroundColor(details: { color: string }): Promise<void> {
         badgeCalls.push({ color: details.color });
+      },
+      onClicked: {
+        addListener(): void {},
       },
     },
   };
@@ -238,6 +288,13 @@ function createFakeBrowser(options: {
     removeTab: (tabId: number): void => removedListener?.(tabId),
     updateTabUrl: (tabId: number, url: string): void => updatedListener?.(tabId, { url }),
     startTabNavigation: (tabId: number): void => updatedListener?.(tabId, { status: 'loading' }),
+    changeWindowBounds: (window: {
+      id?: number;
+      width?: number;
+      height?: number;
+      left?: number;
+      top?: number;
+    }): void => boundsChangedListener?.(window),
   };
 }
 
@@ -322,6 +379,31 @@ afterEach(async () => {
 });
 
 describe('worker boundary: real popup clients against the real listener', () => {
+  it('persists bounds reported for the active floating window', async () => {
+    const fake = await startWorker();
+    const opened = await fake.dispatch(
+      { protocolVersion: 1, type: 'float.open' },
+      POPUP_SENDER,
+    ) as { ok: boolean; windowId?: number };
+
+    expect(opened).toMatchObject({ ok: true, windowId: 900 });
+    fake.changeWindowBounds({
+      id: 900,
+      width: 520,
+      height: 740,
+      left: 35,
+      top: 45,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fake.localRecords[FLOAT_GEOMETRY_STORAGE_KEY]).toEqual({
+      width: 520,
+      height: 740,
+      left: 35,
+      top: 45,
+    });
+  });
+
   it('accepts navigation only from the privileged UI sender', async () => {
     const fake = await startWorker({ fomoTabs: 1 });
     const message = {

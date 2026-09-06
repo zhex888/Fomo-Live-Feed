@@ -1,5 +1,5 @@
 import type { TradeEventV1 } from '../domain/activity';
-import type { LocalSettingsV5 } from '../domain/settings';
+import type { LocalSettingsV6 } from '../domain/settings';
 import type { BuyAudioPlayer } from './offscreen-audio';
 
 export interface LiveBuyNotifier {
@@ -8,7 +8,7 @@ export interface LiveBuyNotifier {
 
 export interface LiveBuyNotifierDependencies {
   preferences: {
-    getSettings(): Promise<LocalSettingsV5>;
+    getSettings(): Promise<LocalSettingsV6>;
   };
   audio: BuyAudioPlayer;
   onFailure?: () => void;

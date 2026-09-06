@@ -9,7 +9,8 @@ import type {
 } from '../domain/annotations';
 import {
   DEFAULT_SETTINGS,
-  type LocalSettingsV5,
+  type DisplayMode,
+  type LocalSettingsV6,
   type LocalSettingsUpdate,
   type UiTheme,
 } from '../domain/settings';
@@ -135,6 +136,13 @@ export interface SidePanelDependencies {
    * controls-free feed.
    */
   variant?: 'sidepanel' | 'popup';
+  /**
+   * Which surface hosts the panel. `floatpanel` enables the geometry
+   * reporter (persists the window size/position so the single global float
+   * window restores it on the next open). Defaults to `sidepanel`, which
+   * reports nothing.
+   */
+  surface?: 'sidepanel' | 'floatpanel';
 }
 
 export function SidePanelApp(props: { deps: SidePanelDependencies }) {
@@ -142,6 +150,7 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
   const runtime = deps.runtime;
   const now = deps.now;
   const variant = deps.variant ?? 'sidepanel';
+  const surface = deps.surface ?? 'sidepanel';
   const showFeedControls = variant === 'popup';
   const { translate } = useLocale();
 
@@ -213,11 +222,54 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
     }).catch(() => {});
   }, [runtime]);
 
+  // Float surface only: report the window geometry (throttled) so the worker
+  // persists it and restores the user's size/position on the next open.
+  useEffect(() => {
+    if (surface !== 'floatpanel') {
+      return;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const report = (): void => {
+      const payload: { width: number; height: number; left?: number; top?: number } = {
+        width: Math.max(1, Math.round(window.outerWidth)),
+        height: Math.max(1, Math.round(window.outerHeight)),
+      };
+      if (Number.isFinite(window.screenX)) {
+        payload.left = Math.round(window.screenX);
+      }
+      if (Number.isFinite(window.screenY)) {
+        payload.top = Math.round(window.screenY);
+      }
+      void runtime.sendMessage({
+        protocolVersion: 1,
+        type: 'float.geometryChanged',
+        payload,
+      }).catch(() => {});
+    };
+    const schedule = (): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        report();
+      }, 400);
+    };
+
+    window.addEventListener('resize', schedule);
+    // Report once on mount so a freshly opened window's geometry is recorded.
+    schedule();
+
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('resize', schedule);
+    };
+  }, [surface, runtime]);
+
   // NIT: start in an explicit loading state so the popup never flashes
   // 'offline' before connection.query resolves.
   const [connectionState, setConnectionState] =
     useState<PopupConnectionState>('loading');
-  const [settings, setSettings] = useState<LocalSettingsV5>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<LocalSettingsV6>(DEFAULT_SETTINGS);
   const [annotations, setAnnotations] = useState<
     ReadonlyMap<string, TraderAnnotationV1>
   >(new Map());
@@ -563,7 +615,7 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
   );
 
   const updateOpinionTranslation = useCallback(
-    (update: Partial<LocalSettingsV5['opinionTranslation']>): void => {
+    (update: Partial<LocalSettingsV6['opinionTranslation']>): void => {
       void preferences
         .updateSettings({ opinionTranslation: update })
         .then((next) => {
@@ -589,7 +641,7 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
   );
 
   const updateNotifications = useCallback(
-    (update: Partial<LocalSettingsV5['notifications']>): void => {
+    (update: Partial<LocalSettingsV6['notifications']>): void => {
       void preferences
         .updateSettings({ notifications: update })
         .then((next) => {
@@ -605,6 +657,19 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
     (update: NonNullable<LocalSettingsUpdate['financialDisplay']>): void => {
       void preferences
         .updateSettings({ financialDisplay: update })
+        .then((next) => {
+          setSettings(next);
+          notifyPreferencesChanged(runtime);
+        })
+        .catch(() => {});
+    },
+    [preferences, runtime],
+  );
+
+  const updateDisplayMode = useCallback(
+    (displayMode: DisplayMode): void => {
+      void preferences
+        .updateSettings({ displayMode })
         .then((next) => {
           setSettings(next);
           notifyPreferencesChanged(runtime);
@@ -792,6 +857,7 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
             onThemeChange={updateTheme}
             onNotificationsChange={updateNotifications}
             onFinancialDisplayChange={updateFinancialDisplay}
+            onDisplayModeChange={updateDisplayMode}
           />
           {pipelineHealth !== undefined && (
             <PipelineDiagnostics health={pipelineHealth} now={() => diagnosticsNow} />

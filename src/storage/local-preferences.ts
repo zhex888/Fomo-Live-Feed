@@ -18,16 +18,19 @@ import {
   localSettingsV3Schema,
   localSettingsV4Schema,
   localSettingsV5Schema,
+  localSettingsV6Schema,
   type LocalSettingsUpdate,
   type LocalSettingsV1,
   type LocalSettingsV2,
   type LocalSettingsV3,
   type LocalSettingsV4,
   type LocalSettingsV5,
+  type LocalSettingsV6,
 } from '../domain/settings';
 import { resolveBrowserLocale, type UiLocale } from '../i18n/catalog';
 
-export const SETTINGS_STORAGE_KEY = 'settings.v5';
+export const SETTINGS_STORAGE_KEY = 'settings.v6';
+export const LEGACY_V5_SETTINGS_STORAGE_KEY = 'settings.v5';
 export const LEGACY_V4_SETTINGS_STORAGE_KEY = 'settings.v4';
 export const LEGACY_V3_SETTINGS_STORAGE_KEY = 'settings.v3';
 /**
@@ -256,8 +259,31 @@ const toLocalSettingsV4 = (
   },
 });
 
-const normalizeFinancialColor = (color: string): LocalSettingsV5['financialDisplay']['buyAmount']['color'] =>
+const normalizeFinancialColor = (color: string): LocalSettingsV6['financialDisplay']['buyAmount']['color'] =>
   color === 'theme' ? 'theme' : color.toUpperCase() as `#${string}`;
+
+interface FinancialDisplayInput {
+  buyAmount: { fontSizePx: number; color: string };
+  sellAmount: { fontSizePx: number; color: string };
+  marketCap: { fontSizePx: number; color: string };
+}
+
+const toFinancialDisplay = (
+  data: FinancialDisplayInput,
+): LocalSettingsV6['financialDisplay'] => ({
+  buyAmount: {
+    fontSizePx: data.buyAmount.fontSizePx,
+    color: normalizeFinancialColor(data.buyAmount.color),
+  },
+  sellAmount: {
+    fontSizePx: data.sellAmount.fontSizePx,
+    color: normalizeFinancialColor(data.sellAmount.color),
+  },
+  marketCap: {
+    fontSizePx: data.marketCap.fontSizePx,
+    color: normalizeFinancialColor(data.marketCap.color),
+  },
+});
 
 const toLocalSettingsV5 = (
   data: z.infer<typeof localSettingsV5Schema>,
@@ -278,20 +304,30 @@ const toLocalSettingsV5 = (
   uiLocale: data.uiLocale,
   uiTheme: data.uiTheme,
   opinionTranslation: { ...data.opinionTranslation },
-  financialDisplay: {
-    buyAmount: {
-      fontSizePx: data.financialDisplay.buyAmount.fontSizePx,
-      color: normalizeFinancialColor(data.financialDisplay.buyAmount.color),
-    },
-    sellAmount: {
-      fontSizePx: data.financialDisplay.sellAmount.fontSizePx,
-      color: normalizeFinancialColor(data.financialDisplay.sellAmount.color),
-    },
-    marketCap: {
-      fontSizePx: data.financialDisplay.marketCap.fontSizePx,
-      color: normalizeFinancialColor(data.financialDisplay.marketCap.color),
-    },
+  financialDisplay: toFinancialDisplay(data.financialDisplay),
+});
+
+const toLocalSettingsV6 = (
+  data: z.infer<typeof localSettingsV6Schema>,
+): LocalSettingsV6 => ({
+  schemaVersion: 6,
+  notifications: {
+    enabled: data.notifications.enabled,
+    maxVisibleToasts: 3,
+    durationMs: data.notifications.durationMs,
+    soundEnabled: data.notifications.soundEnabled,
   },
+  filters: {
+    mutedChains: data.filters.mutedChains,
+    ...(data.filters.minimumUsdAmount !== undefined
+      ? { minimumUsdAmount: data.filters.minimumUsdAmount }
+      : {}),
+  },
+  uiLocale: data.uiLocale,
+  uiTheme: data.uiTheme,
+  opinionTranslation: { ...data.opinionTranslation },
+  financialDisplay: toFinancialDisplay(data.financialDisplay),
+  displayMode: data.displayMode,
 });
 
 const toTraderAnnotation = (
@@ -324,6 +360,11 @@ const parseV5Settings = (value: unknown): LocalSettingsV5 | null => {
   return parsed.success ? toLocalSettingsV5(parsed.data) : null;
 };
 
+const parseV6Settings = (value: unknown): LocalSettingsV6 | null => {
+  const parsed = localSettingsV6Schema.safeParse(value);
+  return parsed.success ? toLocalSettingsV6(parsed.data) : null;
+};
+
 /** Valid V2 settings, or null when the value is absent or corrupt. */
 const parseV2Settings = (value: unknown): LocalSettingsV2 | null => {
   const parsed = localSettingsV2Schema.safeParse(value);
@@ -348,8 +389,8 @@ const parseAnnotation = (candidate: unknown): TraderAnnotationV1 => {
   return toTraderAnnotation(parsed.data);
 };
 
-const cloneDefaultSettings = (): LocalSettingsV5 => ({
-  schemaVersion: 5,
+const cloneDefaultSettings = (): LocalSettingsV6 => ({
+  schemaVersion: 6,
   notifications: { ...DEFAULT_SETTINGS.notifications },
   filters: { ...DEFAULT_SETTINGS.filters },
   uiLocale: DEFAULT_SETTINGS.uiLocale,
@@ -360,6 +401,13 @@ const cloneDefaultSettings = (): LocalSettingsV5 => ({
     sellAmount: { ...DEFAULT_SETTINGS.financialDisplay.sellAmount },
     marketCap: { ...DEFAULT_SETTINGS.financialDisplay.marketCap },
   },
+  displayMode: DEFAULT_SETTINGS.displayMode,
+});
+
+const migrateV5ToV6 = (v5: LocalSettingsV5): LocalSettingsV6 => ({
+  ...v5,
+  schemaVersion: 6,
+  displayMode: 'sidepanel',
 });
 
 const migrateV4ToV5 = (v4: LocalSettingsV4): LocalSettingsV5 => ({
@@ -472,24 +520,33 @@ export class LocalPreferences {
    */
   private updateQueue: Promise<unknown> = Promise.resolve();
 
-  async getSettings(): Promise<LocalSettingsV5> {
+  async getSettings(): Promise<LocalSettingsV6> {
     const stored = await this.storage.get([
       SETTINGS_STORAGE_KEY,
+      LEGACY_V5_SETTINGS_STORAGE_KEY,
       LEGACY_V4_SETTINGS_STORAGE_KEY,
       LEGACY_V3_SETTINGS_STORAGE_KEY,
       LEGACY_SETTINGS_STORAGE_KEY,
       LEGACY_V1_SETTINGS_STORAGE_KEY,
     ]);
 
-    const v5 = parseV5Settings(stored[SETTINGS_STORAGE_KEY]);
+    const v6 = parseV6Settings(stored[SETTINGS_STORAGE_KEY]);
+
+    if (v6 !== null) {
+      return v6;
+    }
+
+    const v5 = parseV5Settings(stored[LEGACY_V5_SETTINGS_STORAGE_KEY]);
 
     if (v5 !== null) {
-      return v5;
+      const migrated = migrateV5ToV6(v5);
+      await this.storage.set({ [SETTINGS_STORAGE_KEY]: migrated });
+      return migrated;
     }
 
     const v4 = parseV4Settings(stored[LEGACY_V4_SETTINGS_STORAGE_KEY]);
     if (v4 !== null) {
-      const migrated = migrateV4ToV5(v4);
+      const migrated = migrateV5ToV6(migrateV4ToV5(v4));
       await this.storage.set({ [SETTINGS_STORAGE_KEY]: migrated });
       return migrated;
     }
@@ -497,29 +554,29 @@ export class LocalPreferences {
     const v3 = parseV3Settings(stored[LEGACY_V3_SETTINGS_STORAGE_KEY]);
 
     if (v3 !== null) {
-      const migrated = migrateV4ToV5(migrateV3ToV4(v3));
+      const migrated = migrateV5ToV6(migrateV4ToV5(migrateV3ToV4(v3)));
       await this.storage.set({ [SETTINGS_STORAGE_KEY]: migrated });
       return migrated;
     }
 
-    // Otherwise migrate a valid legacy V2 record and persist V3 once. A
-    // corrupt V3 record therefore still recovers the user's last V2 state;
+    // Otherwise migrate a valid legacy V2 record and persist V6 once. A
+    // corrupt V6 record therefore still recovers the user's last V2 state;
     // annotation storage is never touched by this path.
     const v2 = parseV2Settings(stored[LEGACY_SETTINGS_STORAGE_KEY]);
 
     if (v2 !== null) {
-      const migrated = migrateV4ToV5(migrateV2ToV4(v2));
+      const migrated = migrateV5ToV6(migrateV4ToV5(migrateV2ToV4(v2)));
 
       await this.storage.set({ [SETTINGS_STORAGE_KEY]: migrated });
 
       return migrated;
     }
 
-    // Finally migrate a valid legacy V1 record and persist V3 once.
+    // Finally migrate a valid legacy V1 record and persist V6 once.
     const v1 = parseV1Settings(stored[LEGACY_V1_SETTINGS_STORAGE_KEY]);
 
     if (v1 !== null) {
-      const migrated = migrateV4ToV5(migrateV1ToV4(v1, this.resolveLocale()));
+      const migrated = migrateV5ToV6(migrateV4ToV5(migrateV1ToV4(v1, this.resolveLocale())));
 
       await this.storage.set({ [SETTINGS_STORAGE_KEY]: migrated });
 
@@ -531,7 +588,7 @@ export class LocalPreferences {
     return { ...cloneDefaultSettings(), uiLocale: this.resolveLocale() };
   }
 
-  async updateSettings(update: LocalSettingsUpdate): Promise<LocalSettingsV5> {
+  async updateSettings(update: LocalSettingsUpdate): Promise<LocalSettingsV6> {
     const run = this.updateQueue.then(() => this.applyUpdate(update));
 
     // Swallow the failure for the queue head so a rejected update cannot
@@ -545,12 +602,12 @@ export class LocalPreferences {
   /** Read-merge-validate-write for a single queued settings update. */
   private async applyUpdate(
     update: LocalSettingsUpdate,
-  ): Promise<LocalSettingsV5> {
+  ): Promise<LocalSettingsV6> {
     const current = await this.getSettings();
 
     const merged = {
       ...current,
-      schemaVersion: 5,
+      schemaVersion: 6,
       notifications: {
         ...current.notifications,
         ...(update.notifications ?? {}),
@@ -583,15 +640,16 @@ export class LocalPreferences {
           ...(update.financialDisplay?.marketCap ?? {}),
         },
       },
+      ...(update.displayMode !== undefined ? { displayMode: update.displayMode } : {}),
     };
 
-    const parsed = localSettingsV5Schema.safeParse(merged);
+    const parsed = localSettingsV6Schema.safeParse(merged);
 
     if (!parsed.success) {
       throw new TypeError('settings update failed validation');
     }
 
-    const next = toLocalSettingsV5(parsed.data);
+    const next = toLocalSettingsV6(parsed.data);
     await this.storage.set({ [SETTINGS_STORAGE_KEY]: next });
 
     return next;

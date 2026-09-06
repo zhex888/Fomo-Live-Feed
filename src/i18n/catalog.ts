@@ -177,6 +177,13 @@ export const EN_MESSAGES = {
   'settings.themeDark': 'Dark theme',
   'settings.buySound': 'Buy sound alert',
   'settings.buySoundDescription': 'Play a sound for each new live buy.',
+  'settings.displayMode': 'Display mode',
+  'settings.displayModeSidePanel': 'Side panel',
+  'settings.displayModeFloating': 'Floating window',
+  'settings.displayModeSidePanelHint':
+    'Click the extension icon to open the feed in Chrome’s side panel.',
+  'settings.displayModeFloatingHint':
+    'Click the extension icon to open one shared floating window. Resize it freely; the size is remembered.',
   'settings.translation': 'Translation',
   'settings.translationTarget': 'Target language',
   'settings.translationTargetAuto': 'Auto',
@@ -424,6 +431,12 @@ export const ZH_MESSAGES: Record<MessageKey, string> = {
   'settings.themeDark': '深色主题',
   'settings.buySound': '买入声音提示',
   'settings.buySoundDescription': '每次收到新的实时买入时播放提示音。',
+  'settings.displayMode': '显示模式',
+  'settings.displayModeSidePanel': '侧边栏',
+  'settings.displayModeFloating': '悬浮窗',
+  'settings.displayModeSidePanelHint': '点击扩展图标，在 Chrome 侧边栏中查看信息流。',
+  'settings.displayModeFloatingHint':
+    '点击扩展图标，打开唯一的全局悬浮窗。可自由调整大小，尺寸会被记住。',
   'settings.translation': '翻译',
   'settings.translationTarget': '目标语言',
   'settings.translationTargetAuto': '自动',

@@ -105,13 +105,13 @@ const TRANSLATED_THESIS = '轮动进入 L1 板块';
 // ---------------------------------------------------------------------------
 
 /**
- * The settings.v5 record shape the E2E suite seeds/reads through the worker.
- * Mirrors src/domain/settings.ts localSettingsV5Schema. Tests share one
+ * The settings.v6 record shape the E2E suite seeds/reads through the worker.
+ * Mirrors src/domain/settings.ts localSettingsV6Schema. Tests share one
  * extension profile, so every test that depends on a specific locale or
  * translation preference seeds it explicitly before opening the panel.
  */
-interface StoredSettingsV5 {
-  schemaVersion: 5;
+interface StoredSettingsV6 {
+  schemaVersion: 6;
   notifications: {
     enabled: boolean;
     maxVisibleToasts: number;
@@ -127,10 +127,11 @@ interface StoredSettingsV5 {
     sellAmount: { fontSizePx: number; color: string };
     marketCap: { fontSizePx: number; color: string };
   };
+  displayMode: 'sidepanel' | 'floating';
 }
 
-const DEFAULT_STORED_SETTINGS: StoredSettingsV5 = {
-  schemaVersion: 5,
+const DEFAULT_STORED_SETTINGS: StoredSettingsV6 = {
+  schemaVersion: 6,
   notifications: { enabled: true, maxVisibleToasts: 3, durationMs: 8000, soundEnabled: false },
   filters: { mutedChains: [] },
   uiLocale: 'en',
@@ -141,25 +142,26 @@ const DEFAULT_STORED_SETTINGS: StoredSettingsV5 = {
     sellAmount: { fontSizePx: 13, color: 'theme' },
     marketCap: { fontSizePx: 13, color: 'theme' },
   },
+  displayMode: 'sidepanel',
 };
 
-/** Rewrites settings.v5 through the worker's chrome.storage.local. */
-const seedStoredSettings = (patch: Partial<StoredSettingsV5>): Promise<void> =>
+/** Rewrites settings.v6 through the worker's chrome.storage.local. */
+const seedStoredSettings = (patch: Partial<StoredSettingsV6>): Promise<void> =>
   worker!.evaluate(async (record) => {
     const chromeApi = (globalThis as unknown as {
       chrome: { storage: { local: { set(item: Record<string, unknown>): Promise<void> } } };
     }).chrome;
-    await chromeApi.storage.local.set({ 'settings.v5': record });
+    await chromeApi.storage.local.set({ 'settings.v6': record });
   }, { ...DEFAULT_STORED_SETTINGS, ...patch });
 
-/** Reads the current settings.v5 record through the worker. */
-const readStoredSettings = (): Promise<StoredSettingsV5> =>
+/** Reads the current settings.v6 record through the worker. */
+const readStoredSettings = (): Promise<StoredSettingsV6> =>
   worker!.evaluate(async () => {
     const chromeApi = (globalThis as unknown as {
       chrome: { storage: { local: { get(key: string): Promise<Record<string, unknown>> } } };
     }).chrome;
-    const stored = await chromeApi.storage.local.get('settings.v5');
-    return stored['settings.v5'] as StoredSettingsV5;
+    const stored = await chromeApi.storage.local.get('settings.v6');
+    return stored['settings.v6'] as StoredSettingsV6;
   });
 
 const deleteStoredEvents = (ids: string[]): Promise<void> =>
@@ -256,8 +258,8 @@ test.beforeAll(async () => {
       chrome: { storage: { local: { set(item: Record<string, unknown>): Promise<void> } } };
     }).chrome;
     await chromeApi.storage.local.set({
-      'settings.v5': {
-        schemaVersion: 5,
+      'settings.v6': {
+        schemaVersion: 6,
         notifications: { enabled: true, maxVisibleToasts: 3, durationMs: 8000, soundEnabled: false },
         filters: { mutedChains: [] },
         uiLocale: 'en',
@@ -268,6 +270,7 @@ test.beforeAll(async () => {
           sellAmount: { fontSizePx: 13, color: 'theme' },
           marketCap: { fontSizePx: 13, color: 'theme' },
         },
+        displayMode: 'sidepanel',
       },
     });
   });
@@ -776,6 +779,90 @@ test.describe('Fomo Live Feed extension', () => {
     expect(manifest.permissions).not.toContain('notifications');
     expect(manifest.permissions).not.toContain('tabs');
     expect(manifest.host_permissions).toEqual(EXPECTED_EXPLICIT_HOSTS);
+  });
+
+  test('opens one real floating feed window and focuses it on repeated requests', async () => {
+    if (context === null || extensionId === null) {
+      throw new Error('extension browser context is not available');
+    }
+
+    const fomoPage = await context.newPage();
+    await fomoPage.goto(fomoUrl());
+    const cdp = await context.newCDPSession(fomoPage);
+    const panel = await openSidePanel(cdp, await fomoTabId());
+
+    const requestFloatingWindow = async (): Promise<{
+      ok: boolean;
+      windowId?: number;
+      created?: boolean;
+    }> => {
+      await panel.evaluate(`(() => {
+        globalThis.__fomoFloatOpenResult = null;
+        void chrome.runtime.sendMessage({
+          protocolVersion: 1,
+          type: "float.open"
+        }).then((result) => {
+          globalThis.__fomoFloatOpenResult = result;
+        });
+        return true;
+      })()`);
+
+      let result:
+        | { ok: boolean; windowId?: number; created?: boolean }
+        | null
+        | undefined;
+      await expect.poll(async () => {
+        result = await panel.evaluate<{
+          ok: boolean;
+          windowId?: number;
+          created?: boolean;
+        } | null>('globalThis.__fomoFloatOpenResult');
+        return result !== null && result !== undefined;
+      }, { timeout: 15_000 }).toBe(true);
+
+      if (result === null || result === undefined) {
+        throw new Error('floating-window request returned no result');
+      }
+      return result;
+    };
+
+    let floatingPage: Page | undefined;
+
+    try {
+      const first = await requestFloatingWindow();
+      expect(first).toMatchObject({ ok: true, created: true });
+
+      await expect.poll(() => {
+        const pages = context!.pages().filter(
+          (page) => page.url() === `chrome-extension://${extensionId}/floatpanel.html`,
+        );
+        floatingPage = pages[0];
+        return pages.length;
+      }, { timeout: 15_000 }).toBe(1);
+
+      if (floatingPage === undefined) {
+        throw new Error('floating feed page is unavailable');
+      }
+
+      await expect(floatingPage.locator('.sidepanel-root')).toBeVisible();
+      await expect(floatingPage.locator('.popup-feed')).toBeVisible();
+
+      const second = await requestFloatingWindow();
+      expect(second).toMatchObject({
+        ok: true,
+        created: false,
+        windowId: first.windowId,
+      });
+      expect(
+        context.pages().filter(
+          (page) => page.url() === `chrome-extension://${extensionId}/floatpanel.html`,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await floatingPage?.close();
+      await panel.close();
+      await fomoPage.close();
+    }
   });
 
   test('plays one buy sound through the real offscreen controller and ignores duplicate and sell events', async () => {

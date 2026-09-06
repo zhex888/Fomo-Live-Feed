@@ -827,8 +827,10 @@ describe('SidePanelApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
 
     await waitFor(() => expect(harness.syncRequests()).toContainEqual({ reason: 'manual' }));
-    expect(screen.getByText('Refreshing…')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+    await waitFor(() => {
+      expect(screen.getByText('Refreshing…')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+    });
   });
 
   it('triggers exactly one stale-panel-open sync when connected with a stale feed', async () => {

@@ -97,6 +97,18 @@ export interface LocalSettingsV5 extends Omit<LocalSettingsV4, 'schemaVersion'> 
 }
 
 /**
+ * Where the live feed UI is presented. `sidepanel` (default) keeps the
+ * current Chrome Side Panel behavior; `floating` makes the action open a
+ * single global popup window instead. V6 adds this slot.
+ */
+export type DisplayMode = 'sidepanel' | 'floating';
+
+export interface LocalSettingsV6 extends Omit<LocalSettingsV5, 'schemaVersion'> {
+  schemaVersion: 6;
+  displayMode: DisplayMode;
+}
+
+/**
  * The six supported product chains plus the `unknown` sentinel (Task 3
  * six-chain catalog, spec section 8.1). This is the single chain union for
  * V1/V2/V3 settings: legacy values (e.g. `monad`) are outside the set, so the
@@ -136,6 +148,7 @@ const v1ChainKeySchema = z.enum(V1_CHAIN_KEYS);
 export const uiLocaleSchema = z.enum(['en', 'zh-CN']);
 export const translationTargetSchema = z.enum(['auto', 'zh', 'en']);
 export const uiThemeSchema = z.enum(['light', 'dark']);
+export const displayModeSchema = z.enum(['sidepanel', 'floating']);
 
 export const metricKeySchema = z.enum([
   'pnl7d',
@@ -290,14 +303,37 @@ export const localSettingsV5Schema = z
   })
   .passthrough();
 
+export const localSettingsV6Schema = z
+  .object({
+    schemaVersion: z.literal(6),
+    notifications: notificationsSchema,
+    filters: z.object({
+      mutedChains: z.array(chainKeySchema),
+      minimumUsdAmount: z.number().finite().nonnegative().optional(),
+    }),
+    uiLocale: uiLocaleSchema,
+    uiTheme: uiThemeSchema,
+    opinionTranslation: z.object({
+      enabled: z.boolean(),
+      targetLanguage: translationTargetSchema,
+    }),
+    financialDisplay: z.object({
+      buyAmount: financialTextStyleSchema,
+      sellAmount: financialTextStyleSchema,
+      marketCap: financialTextStyleSchema,
+    }),
+    displayMode: displayModeSchema,
+  })
+  .passthrough();
+
 export const DEFAULT_FINANCIAL_DISPLAY: FinancialDisplaySettings = {
   buyAmount: { fontSizePx: 13, color: 'theme' },
   sellAmount: { fontSizePx: 13, color: 'theme' },
   marketCap: { fontSizePx: 13, color: 'theme' },
 };
 
-export const DEFAULT_SETTINGS: LocalSettingsV5 = {
-  schemaVersion: 5,
+export const DEFAULT_SETTINGS: LocalSettingsV6 = {
+  schemaVersion: 6,
   notifications: {
     enabled: true,
     maxVisibleToasts: 3,
@@ -314,15 +350,17 @@ export const DEFAULT_SETTINGS: LocalSettingsV5 = {
     targetLanguage: 'auto',
   },
   financialDisplay: DEFAULT_FINANCIAL_DISPLAY,
+  displayMode: 'sidepanel',
 };
 
 export interface LocalSettingsUpdate {
-  notifications?: Partial<LocalSettingsV5['notifications']>;
-  filters?: Partial<LocalSettingsV5['filters']>;
+  notifications?: Partial<LocalSettingsV6['notifications']>;
+  filters?: Partial<LocalSettingsV6['filters']>;
   uiLocale?: UiLocale;
   uiTheme?: UiTheme;
-  opinionTranslation?: Partial<LocalSettingsV5['opinionTranslation']>;
+  opinionTranslation?: Partial<LocalSettingsV6['opinionTranslation']>;
   financialDisplay?: Partial<{
     [K in keyof FinancialDisplaySettings]: Partial<FinancialDisplaySettings[K]>;
   }>;
+  displayMode?: DisplayMode;
 }

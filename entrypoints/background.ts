@@ -48,13 +48,21 @@ import {
   LocalPreferences,
   type LocalPreferencesStorage,
 } from '../src/storage/local-preferences';
-import { configureActionSidePanel } from '../src/sidepanel/sidepanel-api';
+import {
+  applyDisplayModeToAction,
+  configureActionSidePanel,
+} from '../src/sidepanel/sidepanel-api';
 import { MetricRepository } from '../src/storage/metric-repository';
 import { createLiveBuyNotifier } from '../src/background/buy-sound';
 import {
   createOffscreenBuyAudioPlayer,
   type OffscreenAudioChrome,
 } from '../src/background/offscreen-audio';
+import {
+  FloatWindowManager,
+  type FloatWindowChrome,
+  type FloatWindowGeometry,
+} from '../src/background/float-window';
 import {
   openFomoToken,
   type TokenNavigationChrome,
@@ -186,6 +194,47 @@ export default defineBackground(() => {
       update: (windowId, update) => browser.windows.update(windowId, update),
     },
   };
+
+  const floatWindowChrome: FloatWindowChrome = {
+    windows: {
+      create: async (create) => (await browser.windows.create(create)) ?? {},
+      get: async (windowId) => (await browser.windows.get(windowId)) ?? {},
+      update: (windowId, update) => browser.windows.update(windowId, update),
+    },
+    runtime: {
+      getURL: (path) => browser.runtime.getURL(path as '/floatpanel.html'),
+    },
+  };
+  const floatWindowManager = new FloatWindowManager(floatWindowChrome, {
+    session: sessionStorage,
+    local: storageLocal,
+  });
+
+  /**
+   * Current display mode, seeded from storage at bootstrap and updated on
+   * every preferences change. action.onClicked reads it to decide between
+   * opening the side panel (default) and opening/focusing the single global
+   * float window.
+   */
+  let currentDisplayMode: 'sidepanel' | 'floating' = 'sidepanel';
+
+  // When the side panel behavior is OFF (floating mode), Chrome fires
+  // action.onClicked instead of opening the panel. The listener must ALWAYS
+  // be registered (registering it does not suppress the side panel; only
+  // openPanelOnActionClick:false does) so mode flips need no re-registration.
+  browser.action.onClicked.addListener(() => {
+    if (currentDisplayMode !== 'floating') {
+      return;
+    }
+    void floatWindowManager.openOrFocus().then((result) => {
+      if (!result.ok) {
+        diagnostics.record({
+          code: 'storage_failure',
+          messageType: 'float.open',
+        });
+      }
+    }).catch(() => {});
+  });
 
   const pipelineHealth = new PersistedPipelineHealth({
     storage: sessionStorage,
@@ -394,6 +443,27 @@ export default defineBackground(() => {
     void removeTabConnection(tabId).catch(recordStorageFailure);
   });
 
+  browser.windows.onRemoved.addListener((windowId) => {
+    void floatWindowManager.handleWindowRemoved(windowId).catch(() => {});
+  });
+
+  browser.windows.onBoundsChanged.addListener((window) => {
+    if (
+      window.id === undefined ||
+      window.width === undefined ||
+      window.height === undefined
+    ) {
+      return;
+    }
+
+    void floatWindowManager.handleWindowBoundsChanged(window.id, {
+      width: window.width,
+      height: window.height,
+      ...(window.left !== undefined ? { left: window.left } : {}),
+      ...(window.top !== undefined ? { top: window.top } : {}),
+    }).catch(() => {});
+  });
+
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     const nextUrl = changeInfo.url;
     if (
@@ -499,12 +569,24 @@ export default defineBackground(() => {
   });
 
   const bootstrap = async (): Promise<void> => {
+    // Seed the display mode before wiring the action behavior so the action
+    // routes to the right surface from the very first click.
+    const settings = await preferences.getSettings().catch(() => undefined);
+    if (settings !== undefined) {
+      currentDisplayMode = settings.displayMode;
+    }
+
     const sidePanel = await configureActionSidePanel().catch(() => ({ supported: false }));
     if (!sidePanel.supported) {
       diagnostics.record({
         code: 'storage_failure',
         messageType: 'sidepanel.bootstrap',
       });
+    } else {
+      // configureActionSidePanel forces openPanelOnActionClick:true; re-apply
+      // the display-mode routing so floating mode opens the float window
+      // instead of the panel.
+      await applyDisplayModeToAction(currentDisplayMode).catch(() => false);
     }
 
     // BLOCKING 2: re-seed the machine from the persisted per-tab socket
@@ -650,7 +732,30 @@ export default defineBackground(() => {
             throw error;
           });
         case 'preferences.changed':
+          // A preferences write may have flipped displayMode; re-read and
+          // re-route the action so the next click opens the new surface.
+          void preferences.getSettings().then((next) => {
+            if (next.displayMode !== currentDisplayMode) {
+              currentDisplayMode = next.displayMode;
+              void applyDisplayModeToAction(currentDisplayMode).catch(() => {});
+            }
+          }).catch(() => {});
           return undefined;
+        case 'float.open':
+          return floatWindowManager.openOrFocus().then((result) => {
+            if (!result.ok) {
+              diagnostics.record({
+                code: 'storage_failure',
+                messageType: 'float.open',
+              });
+            }
+            return result;
+          });
+        case 'float.geometryChanged':
+          return floatWindowManager
+            .saveGeometry(message.payload as FloatWindowGeometry)
+            .then(() => ({ ok: true as const }))
+            .catch(() => ({ ok: false as const }));
         case 'sync.request':
           // Task 5 Step 5: the side panel/popup asks for a bounded backfill.
           // Single-flight makes a request racing a reconnect backfill a no-op.

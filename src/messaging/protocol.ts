@@ -295,6 +295,22 @@ export const extensionMessageSchema = z.discriminatedUnion('type', [
   }).strict(),
   z.object({
     protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('float.open'),
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('float.geometryChanged'),
+    payload: z
+      .object({
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        left: z.number().int().optional(),
+        top: z.number().int().optional(),
+      })
+      .strict(),
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
     type: z.literal('navigation.openToken'),
     payload: openTokenPayloadSchema,
   }).strict(),
@@ -491,6 +507,8 @@ const KNOWN_MESSAGE_TYPES = [
   'sync.query',
   'sync.changed',
   'sound.playBuy',
+  'float.open',
+  'float.geometryChanged',
   'navigation.openToken',
   'translation.request',
   'translation.ready',

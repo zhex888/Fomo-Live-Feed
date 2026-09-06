@@ -1831,6 +1831,40 @@ body,
   box-shadow: 0 0 0 1px #a78bfa;
 }
 
+.settings-display-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-display-mode-switcher {
+  display: inline-flex;
+  align-self: flex-start;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.display-mode-switcher-button {
+  background: #1e293b;
+  color: #94a3b8;
+  border: 0;
+  padding: 5px 12px;
+  font-size: 11px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.display-mode-switcher-button[aria-pressed='true'] {
+  background: #4c1d95;
+  color: #fff;
+}
+
+.display-mode-switcher-button:focus-visible {
+  outline: 2px solid #a78bfa;
+  outline-offset: -2px;
+}
+
 .settings-translation {
   display: flex;
   flex-direction: column;

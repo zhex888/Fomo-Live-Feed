@@ -1,0 +1,25 @@
+/* Floating-window layout. The feed reuses .sidepanel-root (sidepanel.css);
+   this file only adapts the document to a standalone OS popup window. */
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+/* Keep the single global window usable at its floor: below this the compact
+   feed becomes unreadable. Chrome popup windows are user-resizable, so this
+   is a soft floor via layout rather than a hard OS constraint. */
+body {
+  min-width: 320px;
+  min-height: 400px;
+  overflow: hidden;
+}
+
+/* In the float window the panel root must fill the whole window (sidepanel
+   already sets height:100vh, which equals the popup window height). */
+.sidepanel-root {
+  min-width: 320px;
+}

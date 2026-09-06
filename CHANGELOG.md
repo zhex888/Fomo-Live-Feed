@@ -7,6 +7,29 @@ This document records the additions, changes, fixes, and validation completed
 for every Fomo Live Feed release. Dates use the Asia/Shanghai timezone. Download
 the installation archive and checksum from the corresponding GitHub Release.
 
+## [Unreleased]
+
+### 新增与优化
+
+- 新增可选的悬浮窗显示模式。设置中可将信息流从 Chrome 侧边栏切换为**全局唯一**
+  的独立悬浮窗：点击扩展图标打开或聚焦该窗口，窗口可自由拖动和调整大小，尺寸
+  与位置会被记住并在下次打开时恢复。两种模式共享同一份本地历史、筛选、交易员
+  备注和未读状态，互为软互斥，仍可从浏览器 UI 手动打开侧边栏。
+- 悬浮窗复用与侧边栏完全相同的紧凑信息流、筛选、设置和支持界面，隐私边界不变
+  （仍零页面注入，不申请新权限）。
+
+### Added
+
+- Added an optional floating-window display mode. In Settings the feed can switch
+  from Chrome's side panel to a **single global** floating window: clicking the
+  extension icon opens or focuses it, the window is freely resizable, and its size
+  and position are remembered across opens. Both modes share the same local
+  history, filters, trader annotations, and unread state, and remain soft-mutually
+  exclusive — the side panel stays reachable from the browser UI at any time.
+- The floating window reuses the exact same compact feed, filters, settings, and
+  support UI as the side panel, with an unchanged privacy boundary (still zero page
+  injection, no new permissions).
+
 ## [0.3.0] - 2026-09-01
 
 ### 新增与优化

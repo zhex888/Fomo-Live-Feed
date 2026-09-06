@@ -1,21 +1,23 @@
-import type { LocalSettingsUpdate, LocalSettingsV5, UiTheme } from '../domain/settings';
+import type { DisplayMode, LocalSettingsUpdate, LocalSettingsV6, UiTheme } from '../domain/settings';
 import type { TranslationTarget } from '../i18n/catalog';
 import { useLocale } from '../i18n/LocaleProvider';
 import { FinancialDisplaySettings } from './FinancialDisplaySettings';
 
 export interface SettingsPanelProps {
-  settings: LocalSettingsV5;
+  settings: LocalSettingsV6;
   /** Opinion-translation preference changes (plan Task 7, spec 9.2). */
   onOpinionTranslationChange?(
-    update: Partial<LocalSettingsV5['opinionTranslation']>,
+    update: Partial<LocalSettingsV6['opinionTranslation']>,
   ): void;
   onThemeChange?(theme: UiTheme): void;
   onNotificationsChange?(
-    update: Partial<LocalSettingsV5['notifications']>,
+    update: Partial<LocalSettingsV6['notifications']>,
   ): void;
   onFinancialDisplayChange?(
     update: NonNullable<LocalSettingsUpdate['financialDisplay']>,
   ): void;
+  /** Display-mode (side panel vs single floating window) changes. */
+  onDisplayModeChange?(mode: DisplayMode): void;
 }
 
 /**
@@ -32,6 +34,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
     onThemeChange,
     onNotificationsChange,
     onFinancialDisplayChange,
+    onDisplayModeChange,
   } = props;
   const { locale, setLocale, translate } = useLocale();
 
@@ -86,6 +89,46 @@ export function SettingsPanel(props: SettingsPanelProps) {
               <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M20.3 15.7A8.5 8.5 0 0 1 8.3 3.7 9 9 0 1 0 20.3 15.7Z" /></svg>
             </button>
           </div>
+        </section>
+      )}
+
+      {onDisplayModeChange !== undefined && (
+        <section
+          className="settings-display-mode settings-section"
+          aria-label={translate('settings.displayMode')}
+        >
+          <h2 className="settings-title">{translate('settings.displayMode')}</h2>
+          <div
+            className="settings-display-mode-switcher"
+            role="group"
+            aria-label={translate('settings.displayMode')}
+          >
+            <button
+              type="button"
+              className="display-mode-switcher-button"
+              aria-pressed={settings.displayMode === 'sidepanel'}
+              onClick={() => {
+                onDisplayModeChange('sidepanel');
+              }}
+            >
+              {translate('settings.displayModeSidePanel')}
+            </button>
+            <button
+              type="button"
+              className="display-mode-switcher-button"
+              aria-pressed={settings.displayMode === 'floating'}
+              onClick={() => {
+                onDisplayModeChange('floating');
+              }}
+            >
+              {translate('settings.displayModeFloating')}
+            </button>
+          </div>
+          <p className="settings-description">
+            {settings.displayMode === 'floating'
+              ? translate('settings.displayModeFloatingHint')
+              : translate('settings.displayModeSidePanelHint')}
+          </p>
         </section>
       )}
 

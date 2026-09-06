@@ -45,3 +45,33 @@ export async function configureActionSidePanel(
 
   return { supported: true };
 }
+
+/**
+ * Display-mode routing for the toolbar action (displayMode setting).
+ *
+ * `openPanelOnActionClick` and `action.onClicked` are mutually exclusive:
+ * when the behavior is ON, Chrome opens the side panel and NEVER fires
+ * onClicked; when OFF, onClicked fires. Floating mode therefore flips the
+ * behavior OFF so the action can open the single global float window
+ * instead; side-panel mode flips it back ON. This is a soft switch — the
+ * side panel stays reachable from the browser UI in floating mode.
+ */
+export async function applyDisplayModeToAction(
+  displayMode: 'sidepanel' | 'floating',
+  chromeApi: ChromeWithOptionalSidePanel = (
+    globalThis as typeof globalThis & { chrome?: ChromeWithOptionalSidePanel }
+  ).chrome ?? {},
+): Promise<boolean> {
+  if (typeof chromeApi.sidePanel?.setPanelBehavior !== 'function') {
+    return false;
+  }
+
+  try {
+    await chromeApi.sidePanel.setPanelBehavior({
+      openPanelOnActionClick: displayMode === 'sidepanel',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
