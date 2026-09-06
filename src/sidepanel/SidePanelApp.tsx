@@ -147,6 +147,12 @@ export interface SidePanelDependencies {
    * reports nothing.
    */
   surface?: 'sidepanel' | 'floatpanel' | 'pip';
+  /**
+   * Whether this mounted feed owns read receipts. Defaults to true. The
+   * floating host disables ownership while its PiP child is mounted so the
+   * visually overlapping feeds cannot both mark the same row.
+   */
+  readEnabled?: boolean;
 }
 
 export interface SidePanelAppProps {
@@ -596,7 +602,7 @@ export function SidePanelApp(props: SidePanelAppProps) {
       // BLOCKING 1: only a CONNECTED side panel/popup may mark rendered rows
       // read. In the offline / login-required / reconnecting states the same
       // rows render READ-ONLY below the banner and nothing is ever marked read.
-      readEnabled: connectionState === 'connected',
+      readEnabled: connectionState === 'connected' && (deps.readEnabled ?? true),
     },
   );
 

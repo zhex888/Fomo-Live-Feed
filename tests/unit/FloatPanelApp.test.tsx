@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConnectionQueryResponse } from '../../src/messaging/protocol';
 import type { PipelineHealthSnapshotV1 } from '../../src/background/pipeline-health';
 import type { ActivitySyncState } from '../../src/background/activity-sync';
+import type { TradeEventV1 } from '../../src/domain/activity';
 import type { LocaleContextValue } from '../../src/i18n/LocaleProvider';
 import {
   SidePanelApp,
@@ -75,7 +76,10 @@ function createHarness(surface: 'sidepanel' | 'floatpanel' | 'pip') {
         sentMessages.push(message);
         const type = (message as { type?: string }).type;
         if (type !== undefined && responseOverrides.has(type)) {
-          return responseOverrides.get(type);
+          const response = responseOverrides.get(type);
+          return typeof response === 'function'
+            ? (response as (message: unknown) => unknown)(message)
+            : response;
         }
         if (type === 'connection.query') {
           return CONNECTED;
@@ -169,7 +173,10 @@ function createPipWindow(): PipWindowHarness {
   return {
     pipWindow,
     pipDocument,
-    dispatchPageHide: () => events.dispatchEvent(new Event('pagehide')),
+    dispatchPageHide: () => {
+      closed = true;
+      events.dispatchEvent(new Event('pagehide'));
+    },
   };
 }
 
@@ -286,6 +293,7 @@ describe('FloatingSurfaceHost', () => {
         startedAt: 1_800_000_000_000,
       },
     });
+    harness.setResponse('surface.ready', { ok: true, switchId: 'unsupported-ready' });
 
     render(<FloatingSurfaceHost deps={harness.deps} documentPip={null} />);
 
@@ -309,6 +317,48 @@ describe('FloatingSurfaceHost', () => {
         }),
       }),
     ));
+  });
+
+  it('keeps unsupported return locked through malformed bootstrap and ready responses', async () => {
+    vi.useFakeTimers();
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 142;
+    const transaction = {
+      switchId: 'strict-ready',
+      source: 'sidepanel',
+      target: 'floating',
+      sourceWindowId: 18,
+      phase: 'awaiting-ready',
+      startedAt: 1_800_000_000_000,
+    };
+    let bootstrapCalls = 0;
+    let readyCalls = 0;
+    harness.setResponse('surface.bootstrap', () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1) return { ok: false };
+      if (bootstrapCalls === 3) return { ok: true };
+      return { ok: true, transaction };
+    });
+    harness.setResponse('surface.ready', () => {
+      readyCalls += 1;
+      return readyCalls === 1
+        ? { ok: true, switchId: 'wrong-switch' }
+        : { ok: true, switchId: 'strict-ready' };
+    });
+
+    render(<FloatingSurfaceHost deps={harness.deps} documentPip={null} />);
+    const returnButton = screen.getByRole('button', { name: 'Return to Side Panel' });
+    await act(async () => { await Promise.resolve(); });
+    expect(returnButton).toBeDisabled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(returnButton).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(returnButton).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(returnButton).toBeEnabled();
+    expect(bootstrapCalls).toBe(4);
+    expect(readyCalls).toBe(2);
   });
 
   it('requests PiP once for repeated clicks and exposes a polite busy state', async () => {
@@ -370,6 +420,62 @@ describe('FloatingSurfaceHost', () => {
     });
   });
 
+  it('gives the mounted PiP feed sole read ownership during visual overlap', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 74;
+    const event: TradeEventV1 = {
+      schemaVersion: 1,
+      id: 'fomo:overlap-1',
+      source: 'fomo',
+      traderId: 'overlap-trader',
+      traderHandle: 'overlap',
+      chain: 'bsc',
+      tokenAddress: '0x020bfc650a365f8bb26819deaabf3e21291018b4',
+      tokenSymbol: 'ONE',
+      action: 'buy',
+      occurredAt: 1_799_999_940_000,
+      receivedAt: 1_800_000_000_000,
+    };
+    const hostEvents = deferred<unknown>();
+    let eventQueries = 0;
+    harness.setResponse('events.query', () => {
+      eventQueries += 1;
+      return eventQueries === 1 ? hostEvents.promise : { ok: true, events: [event] };
+    });
+    const pip = createPipWindow();
+    const mountPipFeed: MountPipFeed = (options) => {
+      const container = document.createElement('div');
+      pip.pipDocument.body.append(container);
+      render(
+        <SidePanelApp deps={{ ...options.deps, surface: 'pip' }} />,
+        { container },
+      );
+      return vi.fn();
+    };
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={mountPipFeed}
+      />,
+    );
+    await screen.findByText('Connected');
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(harness.sentMessages().filter(
+      (message) => (message as { type?: string }).type === 'events.markRead',
+    )).toHaveLength(1));
+
+    hostEvents.resolve({ ok: true, events: [event] });
+    await act(async () => {
+      await hostEvents.promise;
+      await Promise.resolve();
+    });
+    expect(harness.sentMessages().filter(
+      (message) => (message as { type?: string }).type === 'events.markRead',
+    )).toHaveLength(1);
+  });
+
   it('moves to recovery after native pagehide and allows reopening', async () => {
     const harness = createHarness('floatpanel');
     harness.deps.getCurrentWindowId = async () => 9;
@@ -396,6 +502,139 @@ describe('FloatingSurfaceHost', () => {
       type: 'pip.closed',
       payload: { sessionId: 'session-close', hostWindowId: 9, reason: 'native-close' },
     });
+  });
+
+  it('ignores a late successful ready response after native pagehide', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 19;
+    const ready = deferred<unknown>();
+    harness.setResponse('pip.ready', ready.promise);
+    const pip = createPipWindow();
+    let mountedFeed: PipFeedRootOptions | undefined;
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={(options) => {
+          mountedFeed = options;
+          return vi.fn();
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(mountedFeed).toBeDefined());
+    act(() => mountedFeed?.onFeedReady(12));
+    await waitFor(() => expect(harness.sentMessages()).toContainEqual(
+      expect.objectContaining({ type: 'pip.ready' }),
+    ));
+
+    act(() => pip.dispatchPageHide());
+    expect(await screen.findByRole('button', { name: 'Reopen always-on-top window' }))
+      .toBeEnabled();
+    ready.resolve({ ok: true, minimized: false });
+    await act(async () => {
+      await ready.promise;
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText('Always-on-top window is active')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Reopen always-on-top window' }))
+      .toBeEnabled();
+  });
+
+  it('does not mount a PiP feed when pagehide wins while host lookup is pending', async () => {
+    const harness = createHarness('floatpanel');
+    harness.setResponse('events.query', new Promise<unknown>(() => {}));
+    const hostWindowId = deferred<number>();
+    const getCurrentWindowId = vi.fn(() => hostWindowId.promise);
+    harness.deps.getCurrentWindowId = getCurrentWindowId;
+    const pip = createPipWindow();
+    const mountPipFeed = vi.fn<MountPipFeed>();
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={mountPipFeed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(getCurrentWindowId).toHaveBeenCalledTimes(1));
+    act(() => pip.dispatchPageHide());
+    hostWindowId.resolve(27);
+    await act(async () => {
+      await hostWindowId.promise;
+      await Promise.resolve();
+    });
+
+    expect(mountPipFeed).not.toHaveBeenCalled();
+    expect(harness.sentMessages().filter(
+      (message) => (message as { type?: string }).type === 'pip.opened',
+    )).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Reopen always-on-top window' }))
+      .toBeEnabled();
+  });
+
+  it('reports one close and never mounts when pagehide wins while pip.opened is pending', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 29;
+    const opened = deferred<unknown>();
+    harness.setResponse('pip.opened', opened.promise);
+    const pip = createPipWindow();
+    const mountPipFeed = vi.fn<MountPipFeed>();
+
+    render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={mountPipFeed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(harness.sentMessages()).toContainEqual(
+      expect.objectContaining({ type: 'pip.opened' }),
+    ));
+
+    act(() => pip.dispatchPageHide());
+    opened.resolve({ ok: true, created: true });
+    await act(async () => {
+      await opened.promise;
+      await Promise.resolve();
+    });
+
+    expect(mountPipFeed).not.toHaveBeenCalled();
+    expect(harness.sentMessages().filter(
+      (message) => (message as { type?: string }).type === 'pip.closed',
+    )).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Reopen always-on-top window' }))
+      .toBeEnabled();
+  });
+
+  it('tears down a mounted PiP feed once across host unmount and later pagehide', async () => {
+    const harness = createHarness('floatpanel');
+    harness.deps.getCurrentWindowId = async () => 35;
+    const pip = createPipWindow();
+    const cleanup = vi.fn();
+    const mountPipFeed: MountPipFeed = vi.fn(() => cleanup);
+    const view = render(
+      <FloatingSurfaceHost
+        deps={harness.deps}
+        documentPip={{ window: null, requestWindow: () => Promise.resolve(pip.pipWindow) }}
+        mountPipFeed={mountPipFeed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Keep floating window on top' }));
+    await waitFor(() => expect(mountPipFeed).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    await Promise.resolve();
+    pip.dispatchPageHide();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(harness.sentMessages().filter(
+      (message) => (message as { type?: string }).type === 'pip.closed',
+    )).toHaveLength(1);
   });
 
   it('returns rejected requests to a retryable error state', async () => {

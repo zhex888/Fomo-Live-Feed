@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 
 import { useLocale } from '../i18n/LocaleProvider';
 import type { PopupRuntimeLike } from '../popup/popup-io';
@@ -38,6 +39,9 @@ interface ActiveSession {
   cleanup?: () => void;
   readyInFlight: boolean;
   closedReported: boolean;
+  cleanupDone: boolean;
+  opened: boolean;
+  terminal: boolean;
   failureReason?: 'mount-failed';
 }
 
@@ -75,17 +79,25 @@ function sendClosed(
   session: ActiveSession,
   reason: 'native-close' | 'mount-failed',
 ): void {
-  if (session.hostWindowId === undefined || session.closedReported) return;
+  if (
+    !session.opened
+    || session.hostWindowId === undefined
+    || session.closedReported
+  ) return;
   session.closedReported = true;
-  void runtime.sendMessage({
-    protocolVersion: 1,
-    type: 'pip.closed',
-    payload: {
-      sessionId: session.id,
-      hostWindowId: session.hostWindowId,
-      reason,
-    },
-  }).catch(() => {});
+  try {
+    void runtime.sendMessage({
+      protocolVersion: 1,
+      type: 'pip.closed',
+      payload: {
+        sessionId: session.id,
+        hostWindowId: session.hostWindowId,
+        reason,
+      },
+    }).catch(() => {});
+  } catch {
+    // Lifecycle teardown remains terminal even if the runtime is gone.
+  }
 }
 
 export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
@@ -99,6 +111,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     supported ? 'activation' : 'unsupported',
   );
   const [childMayBeLive, setChildMayBeLive] = useState(false);
+  const [childOwnsRead, setChildOwnsRead] = useState(false);
   const sessionRef = useRef<ActiveSession | undefined>(undefined);
   const activationInFlightRef = useRef(false);
   const mountedRef = useRef(true);
@@ -114,13 +127,46 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     eventWatermark: 0,
     trackAcknowledgement: true,
   });
+  const finalizeSession = (
+    session: ActiveSession,
+    reason: 'native-close' | 'mount-failed',
+    nextState?: 'recovery' | 'error',
+  ): void => {
+    session.terminal = true;
+    session.readyInFlight = false;
+    if (!session.cleanupDone) {
+      session.cleanupDone = true;
+      const cleanup = session.cleanup;
+      delete session.cleanup;
+      try {
+        cleanup?.();
+      } catch {
+        // Cleanup is best effort, but this session must stay terminal.
+      }
+    }
+    sendClosed(deps.runtime, session, reason);
+    if (mountedRef.current && sessionRef.current === session) {
+      setChildMayBeLive(false);
+      setChildOwnsRead(false);
+      if (nextState !== undefined) setState(nextState);
+    }
+  };
+  const finalizeSessionRef = useRef(finalizeSession);
+  finalizeSessionRef.current = finalizeSession;
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      const cleanup = sessionRef.current?.cleanup;
-      if (cleanup !== undefined) queueMicrotask(cleanup);
+      const session = sessionRef.current;
+      if (session === undefined) return;
+      session.terminal = true;
+      try {
+        session.pipWindow?.close();
+      } catch {
+        // Finalization below still removes the React feed from a live child.
+      }
+      finalizeSessionRef.current(session, session.failureReason ?? 'native-close');
     };
   }, []);
 
@@ -142,7 +188,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
       rootId: 'pip-root',
       mount: async (root, pipWindow) => {
         const session = sessionRef.current;
-        if (session === undefined) {
+        if (session === undefined || session.terminal || pipWindow.closed) {
           throw new Error('Missing PiP activation session');
         }
 
@@ -150,21 +196,35 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
         if (mountedRef.current) setState('awaiting-pip-ready');
         const hostWindowId = await (deps.getCurrentWindowId?.() ?? Promise.resolve(0));
         session.hostWindowId = hostWindowId;
+        if (session.terminal || pipWindow.closed) {
+          throw new Error('PiP session closed during host lookup');
+        }
         const opened = await deps.runtime.sendMessage({
           protocolVersion: 1,
           type: 'pip.opened',
           payload: { sessionId: session.id, hostWindowId },
         });
-        if (!isOpenedResponse(opened) || sessionRef.current !== session) {
+        const openedAccepted = isOpenedResponse(opened);
+        if (openedAccepted) session.opened = true;
+        if (
+          !openedAccepted
+          || sessionRef.current !== session
+          || session.terminal
+          || pipWindow.closed
+        ) {
+          if (openedAccepted && session.terminal) {
+            finalizeSession(session, session.failureReason ?? 'native-close');
+          }
           throw new Error('PiP session registration failed');
         }
 
         const mount = props.mountPipFeed ?? mountPipFeedRoot;
         try {
           const handleReadyFailure = (): void => {
-            if (sessionRef.current !== session) return;
-            session.readyInFlight = false;
+            if (sessionRef.current !== session || session.terminal) return;
             session.failureReason = 'mount-failed';
+            session.terminal = true;
+            session.readyInFlight = false;
             if (mountedRef.current) {
               setChildMayBeLive(true);
               setState('error');
@@ -180,18 +240,23 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
             // dispatching pagehide. Finish the same cleanup here; onClose is
             // idempotent when pagehide was dispatched synchronously.
             if (pipWindow.closed) {
-              session.cleanup?.();
-              delete session.cleanup;
-              sendClosed(deps.runtime, session, 'mount-failed');
-              if (mountedRef.current) setChildMayBeLive(false);
+              finalizeSession(session, 'mount-failed', 'error');
             }
           };
 
+          if (mountedRef.current) {
+            flushSync(() => setChildOwnsRead(true));
+          }
           session.cleanup = mount({
             root,
             deps,
             onFeedReady: (eventWatermark) => {
-              if (sessionRef.current !== session || session.readyInFlight) return;
+              if (
+                sessionRef.current !== session
+                || session.terminal
+                || session.readyInFlight
+                || pipWindow.closed
+              ) return;
               session.readyInFlight = true;
               void deps.runtime.sendMessage({
                 protocolVersion: 1,
@@ -201,6 +266,8 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
                 if (
                   mountedRef.current
                   && sessionRef.current === session
+                  && !session.terminal
+                  && !pipWindow.closed
                   && isReadyResponse(response)
                 ) {
                   setState('active');
@@ -226,27 +293,25 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
           });
         } catch (error) {
           session.failureReason = 'mount-failed';
-          sendClosed(deps.runtime, session, 'mount-failed');
+          finalizeSession(session, 'mount-failed', 'error');
           throw error;
         }
       },
       onClose: (pipWindow) => {
         const session = sessionRef.current;
         if (session === undefined || session.pipWindow !== pipWindow) return;
-        session.cleanup?.();
-        delete session.cleanup;
-        sendClosed(deps.runtime, session, session.failureReason ?? 'native-close');
-        if (mountedRef.current) {
-          setChildMayBeLive(false);
-          setState(session.failureReason === 'mount-failed' ? 'error' : 'recovery');
-        }
+        finalizeSession(
+          session,
+          session.failureReason ?? 'native-close',
+          session.failureReason === 'mount-failed' ? 'error' : 'recovery',
+        );
       },
       onError: (reason) => {
         if (reason !== 'mount-failed') return;
         const session = sessionRef.current;
-        if (session === undefined) return;
+        if (session === undefined || session.terminal) return;
         session.failureReason = 'mount-failed';
-        sendClosed(deps.runtime, session, 'mount-failed');
+        finalizeSession(session, 'mount-failed', 'error');
       },
     },
   ), [api, deps, props.hostDocument, props.mountPipFeed, translate]);
@@ -258,9 +323,13 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
       id: props.createSessionId?.() ?? newId('pip'),
       readyInFlight: false,
       closedReported: false,
+      cleanupDone: false,
+      opened: false,
+      terminal: false,
     };
     sessionRef.current = session;
     setChildMayBeLive(false);
+    setChildOwnsRead(false);
 
     // Keep requestWindow inside the trusted click task. No worker or storage
     // await may run before this call.
@@ -269,6 +338,7 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
     void activation.then((result) => {
       activationInFlightRef.current = false;
       if (!mountedRef.current || sessionRef.current !== session) return;
+      if (session.terminal) return;
       if (!result.ok) {
         session.cleanup?.();
         setState(result.reason === 'unsupported' ? 'unsupported' : 'error');
@@ -283,7 +353,9 @@ export function FloatingSurfaceHost(props: FloatingSurfaceHostProps) {
 
   return (
     <div className="floating-surface-host" data-state={state}>
-      {showFeed && <SidePanelApp deps={deps} />}
+      {showFeed && (
+        <SidePanelApp deps={{ ...deps, readEnabled: !childOwnsRead }} />
+      )}
 
       {state === 'unsupported' ? (
         <section className="floating-host-card floating-host-card--standalone">
