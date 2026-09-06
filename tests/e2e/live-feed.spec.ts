@@ -766,6 +766,18 @@ test.describe('Fomo Live Feed extension', () => {
       await ensureSettingsClosed(panel);
       await panel.close();
     }));
+
+    // Surface bootstrap starts capture recovery without blocking UI startup.
+    // Let an in-flight tabs.query settle, then remove every fixture Fomo page
+    // so one test's automatic recovery cannot leak a tab into the next test.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await Promise.all(
+        (context?.pages() ?? [])
+          .filter((page) => page.url().startsWith('https://fomo.family/'))
+          .map((page) => page.close()),
+      );
+    }
   });
 
   test('production manifest keeps the Side Panel and explicit least-privilege contract', () => {
@@ -933,6 +945,7 @@ test.describe('Fomo Live Feed extension', () => {
       await reopenedPanel?.close();
       await floatingPage?.close();
       await fomoPage.close();
+      await deleteStoredEvents(['fomo:overflow-901']);
     }
   });
 
