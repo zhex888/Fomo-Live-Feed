@@ -41,6 +41,19 @@ const MAX_MARK_READ_ID_LENGTH = 512;
 const MAX_TRANSLATION_TEXT_LENGTH = 2_000;
 const MAX_TRANSLATION_ID_LENGTH = 128;
 const MAX_TRANSLATION_LANGUAGE_LENGTH = 16;
+const MAX_SWITCH_ID_LENGTH = 128;
+
+export const SURFACE_KEYS = ['sidepanel', 'floating'] as const;
+export type SurfaceKey = (typeof SURFACE_KEYS)[number];
+
+export const SURFACE_SWITCH_FAILURES = [
+  'switch-in-progress',
+  'target-open-failed',
+  'target-ready-timeout',
+  'stale-switch',
+  'source-close-failed',
+] as const;
+export type SurfaceSwitchFailure = (typeof SURFACE_SWITCH_FAILURES)[number];
 
 const CHAIN_KEYS = [
   'bsc',
@@ -200,6 +213,43 @@ const activityBroadcastPayloadSchema = z
   })
   .strict();
 
+const surfaceSwitchRequestPayloadSchema = z
+  .object({
+    switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
+    source: z.enum(SURFACE_KEYS),
+    target: z.enum(SURFACE_KEYS),
+    sourceWindowId: z.number().int().nonnegative(),
+  })
+  .strict()
+  .refine(({ source, target }) => source !== target, {
+    message: 'source and target must differ',
+  });
+
+const surfaceBootstrapPayloadSchema = z
+  .object({
+    surface: z.enum(SURFACE_KEYS),
+    windowId: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const surfaceReadyPayloadSchema = z
+  .object({
+    switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
+    surface: z.enum(SURFACE_KEYS),
+    eventWatermark: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const surfaceSwitchChangedPayloadSchema = z
+  .discriminatedUnion('ok', [
+    z.object({ ok: z.literal(true), switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH) }).strict(),
+    z.object({
+      ok: z.literal(false),
+      switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
+      reason: z.enum(SURFACE_SWITCH_FAILURES),
+    }).strict(),
+  ]);
+
 // Versioned, discriminated message union for every extension context. Keep the
 // branch list in KNOWN_MESSAGE_TYPES in sync with this union.
 export const extensionMessageSchema = z.discriminatedUnion('type', [
@@ -308,6 +358,26 @@ export const extensionMessageSchema = z.discriminatedUnion('type', [
         top: z.number().int().optional(),
       })
       .strict(),
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('surface.switch.request'),
+    payload: surfaceSwitchRequestPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('surface.bootstrap'),
+    payload: surfaceBootstrapPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('surface.ready'),
+    payload: surfaceReadyPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('surface.switch.changed'),
+    payload: surfaceSwitchChangedPayloadSchema,
   }).strict(),
   z.object({
     protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -509,6 +579,10 @@ const KNOWN_MESSAGE_TYPES = [
   'sound.playBuy',
   'float.open',
   'float.geometryChanged',
+  'surface.switch.request',
+  'surface.bootstrap',
+  'surface.ready',
+  'surface.switch.changed',
   'navigation.openToken',
   'translation.request',
   'translation.ready',

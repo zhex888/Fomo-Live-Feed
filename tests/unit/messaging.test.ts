@@ -512,6 +512,82 @@ describe('protocol', () => {
       }
     });
 
+    it('accepts strict surface switching messages', () => {
+      const messages = [
+        {
+          protocolVersion: 1,
+          type: 'surface.switch.request',
+          payload: {
+            switchId: 'switch-1',
+            source: 'sidepanel',
+            target: 'floating',
+            sourceWindowId: 7,
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'surface.bootstrap',
+          payload: { surface: 'floating', windowId: 8 },
+        },
+        {
+          protocolVersion: 1,
+          type: 'surface.ready',
+          payload: {
+            switchId: 'switch-1',
+            surface: 'floating',
+            eventWatermark: 12,
+          },
+        },
+      ];
+
+      for (const message of messages) {
+        expect(parseExtensionMessage(message).ok).toBe(true);
+      }
+    });
+
+    it('rejects invalid surface switching payloads', () => {
+      const messages = [
+        {
+          protocolVersion: 1,
+          type: 'surface.switch.request',
+          payload: {
+            switchId: '',
+            source: 'sidepanel',
+            target: 'floating',
+            sourceWindowId: 7,
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'surface.switch.request',
+          payload: {
+            switchId: 'switch-1',
+            source: 'sidepanel',
+            target: 'sidepanel',
+            sourceWindowId: 7,
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'surface.ready',
+          payload: {
+            switchId: 'switch-1',
+            surface: 'floating',
+            eventWatermark: -1,
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'surface.bootstrap',
+          payload: { surface: 'floating', windowId: 8, extra: true },
+        },
+      ];
+
+      for (const message of messages) {
+        expect(parseExtensionMessage(message).ok).toBe(false);
+      }
+    });
+
     it('reports only closed-set reason codes and never echoes the rejected payload', () => {
       const hostile = [
         { protocolVersion: 1, type: 'activity.ingest', payload: { secret: 'hunter2' }, extra: true },
@@ -791,6 +867,9 @@ describe('guards', () => {
       expect(trustClassForMessageType('pipeline.healthQuery')).toBe('privileged-ui-page');
       expect(trustClassForMessageType('translation.request')).toBe('privileged-ui-page');
       expect(trustClassForMessageType('navigation.openToken')).toBe('privileged-ui-page');
+      expect(trustClassForMessageType('surface.switch.request')).toBe('privileged-ui-page');
+      expect(trustClassForMessageType('surface.bootstrap')).toBe('privileged-ui-page');
+      expect(trustClassForMessageType('surface.ready')).toBe('privileged-ui-page');
     });
 
     it('requires the privileged UI class for sync.request/sync.query and none for sync.changed (Task 5 Step 5)', () => {
@@ -800,6 +879,7 @@ describe('guards', () => {
       // activity.broadcast / events.changed / pipeline.healthChanged.
       expect(trustClassForMessageType('sync.changed')).toBeNull();
       expect(trustClassForMessageType('sound.playBuy')).toBeNull();
+      expect(trustClassForMessageType('surface.switch.changed')).toBeNull();
     });
 
     it('rejects sound.playBuy as an inbound worker message', () => {
