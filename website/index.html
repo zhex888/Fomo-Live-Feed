@@ -24,14 +24,15 @@
       <section class="hero demo-section shell">
         <div class="hero-copy reveal">
           <div class="eyebrow"><span class="status-dot"></span>FOMO 实时动态 · SIDE PANEL / FLOATING WINDOW</div>
-          <h1>你关注的交易员，<br />刚刚做了什么？</h1>
-          <p>Fomo Live Feed 把关注交易员的买入、卖出和观点，实时放进 Chrome 侧边栏或悬浮窗，并在本地留下可搜索、可筛选的历史。</p>
+          <h1><span class="hero-title-line">你关注的交易员，</span><span class="hero-title-line">刚刚做了什么？</span></h1>
+          <p>Fomo Live Feed 把关注交易员的买入、卖出和观点，实时放进 Chrome 侧边栏或始终置顶的悬浮窗，并在本地留下可搜索、可筛选的历史。</p>
           <div class="hero-actions"><a class="button button-primary install-link" href="#install">下载 v0.4.0 ZIP <span aria-hidden="true">↗</span></a><a class="secondary-link" href="#workflow">查看安装方式 <span aria-hidden="true">↓</span></a></div>
           <div class="requirements"><span>Chrome 141+</span><i></i><span>需要登录 Fomo</span><i></i><span>开源</span></div>
         </div>
 
         <div class="product-stage reveal reveal-delay" aria-label="Fomo Live Feed 示例界面">
-          <div class="stage-glow" aria-hidden="true"></div><div class="sample-badge">示例界面</div>
+          <div class="stage-glow" aria-hidden="true"></div>
+          <div class="stage-label-row"><span class="sample-badge">示例界面</span></div>
           <div class="browser-frame">
             <div class="browser-bar"><span class="browser-dots"><i></i><i></i><i></i></span><span>Chrome Side Panel</span><span class="live-badge"><i></i>已连接</span></div>
             <div class="demo-tabs" role="tablist" aria-label="产品界面预览">
@@ -54,10 +55,10 @@
               <div class="panel-title"><span><b>设置</b><small>偏好保存在当前浏览器</small></span><span class="local-badge">LOCAL</span></div><div class="setting-row"><span><b>买入提示音</b><small>仅响应实时买入，默认关闭</small></span><span class="switch"><i></i></span></div><div class="setting-row"><span><b>观点翻译</b><small>优先使用 Chrome 设备端翻译</small></span><span class="switch on"><i></i></span></div><div class="setting-row"><span><b>界面语言</b><small>English / 简体中文</small></span><span class="select-value">中文⌄</span></div><div class="setting-row"><span><b>界面主题</b><small>浅色 / 深色</small></span><span class="theme-value"><i></i><i class="active"></i></span></div><div class="panel-foot"><span>Chrome storage.local</span><span>自动保存</span></div>
             </div>
             <div id="demo-display-mode" class="demo-panel" role="tabpanel" aria-labelledby="tab-display-mode" data-demo-panel="display-mode" hidden>
-              <div class="panel-title"><span><b>显示模式</b><small>一个信息流，两种窗口形态</small></span><span class="local-badge">SYNC</span></div>
+              <div class="panel-title"><span><b>显示模式</b><small>一个信息流，两种窗口形态</small></span><span class="local-badge">ALWAYS ON TOP</span></div>
               <div class="display-mode-options" aria-label="显示模式示例"><span class="display-mode-option active">侧边栏</span><span class="display-mode-option">悬浮窗</span></div>
-              <div class="floating-demo"><div class="floating-demo-window"><div class="floating-demo-title"><i></i><span>Fomo 实时动态</span><em>全局唯一</em></div><div class="floating-demo-row"><b>Anon Alpha</b><span>买入 $MORPHO</span><strong>$24.8K</strong></div><div class="floating-demo-row"><b>KOL Radar</b><span>观点 · Base</span><strong>MC: $4.2M</strong></div></div></div>
-              <div class="panel-foot"><span>历史、筛选、备注与未读状态保持同步</span><span>记住窗口位置</span></div>
+              <div class="floating-demo"><div class="floating-demo-window"><div class="floating-demo-title"><i></i><span>Fomo 实时动态</span><em>始终置顶</em></div><div class="floating-demo-row"><b>Anon Alpha</b><span>买入 $MORPHO</span><strong>$24.8K</strong></div><div class="floating-demo-row"><b>KOL Radar</b><span>观点 · Base</span><strong>MC: $4.2M</strong></div></div></div>
+              <div class="panel-foot"><span>历史、筛选、备注与未读数据保持同步</span><span>跨 Chrome 标签页可见</span></div>
             </div>
           </div>
         </div>
@@ -74,12 +75,12 @@
         </div>
       </section>
 
-      <section class="workflow" id="workflow"><div class="shell"><div class="section-heading centered reveal"><span class="eyebrow">使用方式</span><h2>三步开始接收动态。</h2></div><div class="steps"><article class="step reveal"><span>01</span><div class="step-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg></div><h3>下载并加载</h3><p>下载并解压 ZIP，在 Chrome 扩展管理页打开开发者模式，然后加载文件夹。</p></article><article class="step reveal reveal-delay"><span>02</span><div class="step-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21c1-5 4-7 8-7s7 2 8 7" /></svg></div><h3>登录 Fomo</h3><p>保持至少一个已登录的 Fomo 页面处于打开状态。</p></article><article class="step reveal reveal-delay-2"><span>03</span><div class="step-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></svg></div><h3>选择显示模式</h3><p>点击扩展图标打开信息流，并在设置中选择侧边栏或悬浮窗。</p></article></div></div></section>
+      <section class="workflow" id="workflow"><div class="shell"><div class="section-heading centered reveal"><span class="eyebrow">使用方式</span><h2>三步开始接收动态。</h2></div><div class="steps"><article class="step reveal"><span>01</span><div class="step-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg></div><h3>下载并加载</h3><p>下载并解压 ZIP，在 Chrome 扩展管理页打开开发者模式，然后加载文件夹。</p></article><article class="step reveal reveal-delay"><span>02</span><div class="step-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21c1-5 4-7 8-7s7 2 8 7" /></svg></div><h3>登录 Fomo</h3><p>保持至少一个已登录的 Fomo 页面处于打开状态。</p></article><article class="step reveal reveal-delay-2"><span>03</span><div class="step-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></svg></div><h3>选择显示模式</h3><p>在设置中选择侧边栏或始终置顶悬浮窗；悬浮窗跨标签页保持可见，不占用侧边栏。</p></article></div></div></section>
 
       <section class="updates shell" id="updates"><div class="section-heading reveal"><span class="eyebrow">版本更新</span><h2>每个版本，<br /><span>都有明确的变化。</span></h2><p>与仓库中的 CHANGELOG.md 保持一致，完整记录请查看对应 GitHub Release。</p></div><div class="release-list reveal">
-        <article class="release-item"><div class="release-meta"><span class="version-tag">v0.4.0</span><span class="release-date">2026-09-06</span><a class="release-link" href="https://github.com/novus77/Fomo-Live-Feed/releases/tag/v0.4.0" target="_blank" rel="noopener noreferrer">Release ↗</a></div><ul class="release-changes">
-          <li><span class="change-tag new">新增</span><span>侧边栏和悬浮窗一键切换，目标界面同步完成后才关闭原界面。</span></li>
-          <li><span class="change-tag new">新增</span><span>全局唯一悬浮窗，可拖动、缩放，并自动记住窗口尺寸与位置。</span></li>
+        <article class="release-item"><div class="release-meta"><span class="version-tag">v0.4.0</span><span class="release-date">2026-09-07</span><a class="release-link" href="https://github.com/novus77/Fomo-Live-Feed/releases/tag/v0.4.0" target="_blank" rel="noopener noreferrer">Release ↗</a></div><ul class="release-changes">
+          <li><span class="change-tag new">新增</span><span>侧边栏和始终置顶悬浮窗一键切换，目标界面同步完成后才关闭原界面。</span></li>
+          <li><span class="change-tag new">新增</span><span>全局唯一悬浮窗，跨 Chrome 标签页保持可见，可拖动、缩放，且不占用侧边栏。</span></li>
           <li><span class="change-tag polish">优化</span><span>两个界面共享连接、历史、筛选、设置、交易员备注与未读数据，切换无需额外操作。</span></li>
           <li><span class="change-tag fix">修复</span><span>清理重载后的旧窗口状态，避免重复悬浮窗、旧连接状态和越界窗口。</span></li>
         </ul></article>

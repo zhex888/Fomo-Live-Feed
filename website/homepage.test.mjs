@@ -22,6 +22,14 @@ test('keeps one product demo and three feature cards', () => {
   assert.doesNotMatch(html, /class="proof-section/);
 });
 
+test('keeps the hero headline to two deliberate lines and separates the sample label', () => {
+  assert.equal((html.match(/class="hero-title-line"/g) ?? []).length, 2);
+  assert.match(
+    html,
+    /class="stage-label-row"[\s\S]*class="sample-badge"[\s\S]*class="browser-frame"/,
+  );
+});
+
 test('fills the primary feature card with four representative activity rows', () => {
   assert.equal((html.match(/class="mini-event /g) ?? []).length, 4);
   assert.match(html, /mini-event-buy/);
@@ -74,7 +82,9 @@ test('downloads the current v0.4.0 Chrome package', () => {
 test('explains the v0.4.0 display-mode behavior', () => {
   assert.match(html, /releases\/tag\/v0\.4\.0/);
   assert.match(html, /侧边栏和悬浮窗/);
-  assert.match(html, /全局唯一/);
+  assert.match(html, /始终置顶/);
+  assert.match(html, /跨.*标签页/);
+  assert.match(html, /不占用侧边栏/);
   assert.match(html, /数据.*同步/);
 });
 

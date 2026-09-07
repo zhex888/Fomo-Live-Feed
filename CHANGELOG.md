@@ -9,99 +9,55 @@ the installation archive and checksum from the corresponding GitHub Release.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-07
+
 ### 新增与优化
 
 - 将可选悬浮模式升级为始终置顶的 Document Picture-in-Picture 信息流。
   侧边栏先与小型激活宿主完成原子切换，用户一次直接点击后打开 PiP；
   PiP 就绪后宿主最小化，全程只保留一个可交互信息流。
-- PiP 完整复用当前紧凑信息流、连接状态、筛选、设置、支持、交易员备注、
+- PiP 完整复用紧凑信息流、连接状态、筛选、设置、支持、交易员备注、
   翻译、未读和声音行为；在 Chrome 标签页之间切换或导航时仍保持在最前，
   且不占用侧边栏宽度。
 - 新增 PiP 内“返回侧边栏”原子切换、原生关闭后宿主恢复、失败重试、重复
   激活去重与扩展重载恢复；不增加权限，不使用普通弹窗作为伪置顶降级。
 
-### 验证
-
-- 新增真实 Chromium Document PiP 端到端覆盖，验证同步数据、跨标签页保持、
-  单一信息流、重复激活、原生关闭、被拒绝的激活、原子返回和 stale session
-  重载安全性。
-- 新增完整的手工验证矩阵，覆盖尺寸、主题、语言、筛选、设置、支持、
-  备注、翻译、未读、声音、恢复与不占用页面宽度等场景。
-
-### Added and improved
-
-- Upgraded optional floating mode to an always-on-top Document
-  Picture-in-Picture feed. The Side Panel first completes an atomic handoff to
-  a compact activation host; one direct user action opens PiP, and the host is
-  minimized after PiP readiness so only one interactive feed remains.
-- Reused the complete compact feed composition in PiP, including connection
-  state, filters, Settings, Support, trader annotations, translation, unread
-  state, and sound behavior. PiP remains above Chrome tabs during tab changes
-  and navigation without consuming Side Panel width.
-- Added atomic **Return to Side Panel**, native-close host recovery, retryable
-  failures, repeated-activation deduplication, and safe extension-reload
-  recovery. No permissions or ordinary-popup always-on-top fallback were added.
-
-### Validation
-
-- Added real-Chromium Document PiP end-to-end coverage for synchronized state,
-  cross-tab persistence, a single interactive feed, repeated activation,
-  native close, activation rejection, atomic return, and stale-session reload
-  safety.
-- Added a complete manual matrix for sizing, locale, theme, filters, Settings,
-  Support, annotations, translation, unread state, sound, recovery, and zero
-  Side Panel width while PiP is active.
-
-## [0.4.0] - 2026-09-06
-
-### 新增与优化
-
-- 新增可选的悬浮窗显示模式。设置中可将信息流从 Chrome 侧边栏切换为**全局唯一**
-  的独立悬浮窗：点击扩展图标打开或聚焦该窗口，窗口可自由拖动和调整大小，尺寸
-  与位置会被记住并在下次打开时恢复。两种模式共享同一份本地历史、筛选、交易员
-  备注和未读状态，互为软互斥，仍可从浏览器 UI 手动打开侧边栏。
-- 悬浮窗复用与侧边栏完全相同的紧凑信息流、筛选、设置和支持界面，隐私边界不变
-  （仍零页面注入，不申请新权限）。
-
 ### 修复
 
-- 修复切换显示模式时目标界面可能未创建、原界面提前关闭，以及悬浮窗显示旧连接
-  状态的问题。
-- 修复扩展重新加载后浮窗状态残留、重复创建窗口和窗口位置越出当前屏幕的问题。
+- 修复快速重复切换、激活被拒绝、原生关闭和扩展重载时可能出现的
+  旧会话、重复窗口或原界面提前关闭问题。
 
 ### 验证
 
 - TypeScript 类型检查通过。
-- 1,363 项单元及集成测试通过。
-- 16 项 Playwright 端到端测试通过。
-- 官网 13 项契约测试通过。
+- 1,596 项单元及集成测试通过。
+- 19 项 Playwright 端到端测试通过。
+- 官网 14 项契约测试通过。
 - Chrome Manifest V3 生产构建、本地安装包及 SHA-256 校验通过。
 
-### Added
+### Added and improved
 
-- Added an optional floating-window display mode. In Settings the feed can switch
-  from Chrome's side panel to a **single global** floating window: clicking the
-  extension icon opens or focuses it, the window is freely resizable, and its size
-  and position are remembered across opens. Both modes share the same local
-  history, filters, trader annotations, and unread state, and remain soft-mutually
-  exclusive — the side panel stays reachable from the browser UI at any time.
-- The floating window reuses the exact same compact feed, filters, settings, and
-  support UI as the side panel, with an unchanged privacy boundary (still zero page
-  injection, no new permissions).
+- Upgraded floating mode to an always-on-top Document Picture-in-Picture feed.
+  The Side Panel completes an atomic handoff through a compact activation host;
+  after PiP is ready, only one interactive feed remains.
+- Reused the complete compact feed in PiP, including connection state, filters,
+  Settings, Support, trader annotations, translation, unread state, and sound.
+  It remains above Chrome tabs during navigation without consuming Side Panel width.
+- Added atomic **Return to Side Panel**, native-close recovery, retryable failures,
+  repeated-activation deduplication, and safe extension-reload recovery without
+  adding permissions or an ordinary-popup fallback.
 
 ### Fixed
 
-- Prevented display-mode switches from closing the source before the destination
-  was ready, and kept connection state current in the floating window.
-- Cleared stale floating-window state after reload, prevented duplicate windows,
-  and constrained restored window bounds to the active display.
+- Prevented stale sessions, duplicate windows, and premature source closure during
+  rapid repeated switches, rejected activation, native close, and extension reload.
 
 ### Validation
 
 - TypeScript type checking.
-- 1,363 unit and integration tests.
-- 16 Playwright end-to-end tests.
-- 13 website contract tests.
+- 1,596 unit and integration tests.
+- 19 Playwright end-to-end tests.
+- 14 website contract tests.
 - Chrome Manifest V3 production build, local package, and SHA-256 verification.
 
 ## [0.3.0] - 2026-09-01
@@ -264,3 +220,4 @@ the installation archive and checksum from the corresponding GitHub Release.
 [0.2.0]: https://github.com/novus77/Fomo-Live-Feed/releases/tag/v0.2.0
 [0.1.0]: https://github.com/novus77/Fomo-Live-Feed/releases/tag/v0.1.0
 [0.3.0]: https://github.com/novus77/Fomo-Live-Feed/releases/tag/v0.3.0
+[0.4.0]: https://github.com/novus77/Fomo-Live-Feed/releases/tag/v0.4.0
