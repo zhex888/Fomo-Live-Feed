@@ -864,12 +864,7 @@ export function SidePanelApp(props: SidePanelAppProps) {
               toggleUtilityPanel('support');
             }}
           >
-            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M12 21s-7-4.35-9.33-8.28C.66 9.33 2.27 5 6.4 5c2.02 0 3.16 1.13 3.6 1.72C10.44 6.13 11.58 5 13.6 5c4.13 0 5.74 4.33 3.73 7.72C15 16.65 12 21 12 21Z"
-              />
-            </svg>
+            <span>{translate('header.support')}</span>
           </button>
         </div>
       </header>

@@ -472,7 +472,7 @@ describe('SidePanelApp', () => {
     ).toEqual([]));
   });
 
-  it('orders filter, refresh, settings, and icon-only support in the header', async () => {
+  it('orders filter, refresh, settings, and a visible donation button in the header', async () => {
     const harness = createHarness({ ok: true, connected: true, authenticated: true, hasFomoTab: true });
     const { container } = render(<SidePanelApp deps={harness.deps} />);
 
@@ -485,9 +485,9 @@ describe('SidePanelApp', () => {
       'Filters',
       'Refresh',
       'Settings',
-      'Support',
+      'Donate',
     ]);
-    expect(screen.getByRole('button', { name: 'Support' })).toHaveTextContent('');
+    expect(screen.getByRole('button', { name: 'Donate' })).toHaveTextContent('Donate');
   });
 
   it('keeps filters, Settings, and Support mutually exclusive', async () => {
@@ -502,14 +502,14 @@ describe('SidePanelApp', () => {
     expect(screen.queryByRole('region', { name: 'Settings' })).not.toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Feed filters' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Support' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Donate' }));
     expect(screen.queryByRole('dialog', { name: 'Feed filters' })).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Settings' })).not.toBeInTheDocument();
     expect(
       screen.getByRole('region', { name: 'Support the Developer' }),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Support' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Donate' }));
     expect(
       screen.queryByRole('region', { name: 'Support the Developer' }),
     ).not.toBeInTheDocument();
@@ -537,7 +537,7 @@ describe('SidePanelApp', () => {
     render(<SidePanelApp deps={harness.deps} />);
 
     await waitFor(() => expect(connectionStatus()).toHaveTextContent('Connected'));
-    fireEvent.click(screen.getByRole('button', { name: 'Support' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Donate' }));
     fireEvent.click(
       screen.getByRole('button', { name: 'Copy Robinhood & BSC address' }),
     );

@@ -21,6 +21,7 @@ the installation archive and checksum from the corresponding GitHub Release.
   且不占用侧边栏宽度。
 - 新增 PiP 内“返回侧边栏”原子切换、原生关闭后宿主恢复、失败重试、重复
   激活去重与扩展重载恢复；不增加权限，不使用普通弹窗作为伪置顶降级。
+- 将顶部工具栏的爱心图标替换为明确的“捐赠”文字按钮，保持原有高度与交互反馈。
 
 ### 修复
 
@@ -46,6 +47,8 @@ the installation archive and checksum from the corresponding GitHub Release.
 - Added atomic **Return to Side Panel**, native-close recovery, retryable failures,
   repeated-activation deduplication, and safe extension-reload recovery without
   adding permissions or an ordinary-popup fallback.
+- Replaced the heart-only toolbar control with an explicit localized donation
+  label while preserving the existing height and interaction feedback.
 
 ### Fixed
 

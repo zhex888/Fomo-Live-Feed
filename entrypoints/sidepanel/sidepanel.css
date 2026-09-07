@@ -200,6 +200,12 @@ body,
 }
 
 .sidepanel-support-toggle {
+  width: auto;
+  min-width: 44px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
   color: #c4b5fd;
   background: var(--ui-control);
   border-color: var(--ui-rule);

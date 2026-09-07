@@ -2271,7 +2271,7 @@ test.describe('Fomo Live Feed extension', () => {
       "document.querySelectorAll('.sidepanel-header-controls button').length",
     );
     expect(headerButtons).toBe(4);
-    expect(await panel.attribute('.sidepanel-support-toggle', 'title')).toBe('Support');
+    expect(await panel.attribute('.sidepanel-support-toggle', 'title')).toBe('Donate');
 
     await panel.click('.sidepanel-support-toggle');
     await expect.poll(async () => panel.exists('.support-panel.utility-panel')).toBe(true);

@@ -26,7 +26,7 @@ export const EN_MESSAGES = {
   // Header / app chrome
   'header.title': 'Fomo Live Feed',
   'header.settings': 'Settings',
-  'header.support': 'Support',
+  'header.support': 'Donate',
   'header.refresh': 'Refresh',
   'header.refreshing': 'Refreshing…',
   'header.refreshUpdated': 'Updated',
@@ -301,7 +301,7 @@ export const ZH_MESSAGES: Record<MessageKey, string> = {
   // Header / app chrome
   'header.title': 'Fomo 实时动态',
   'header.settings': '设置',
-  'header.support': '打赏',
+  'header.support': '捐赠',
   'header.refresh': '刷新',
   'header.refreshing': '正在刷新…',
   'header.refreshUpdated': '已更新',
