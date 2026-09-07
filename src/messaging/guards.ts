@@ -22,6 +22,8 @@ export interface MessageSenderLike {
   id?: string;
   url?: string;
   tab?: {
+    id?: number;
+    windowId?: number;
     url?: string;
   };
 }
@@ -133,6 +135,35 @@ export function isTrustedPopupSender(
   return sender.tab === undefined || isOwnExtensionUrl(sender.tab.url);
 }
 
+/** Bind PiP lifecycle messages to the tracked floatpanel Chrome window. */
+export function isTrustedFloatHostSender(
+  sender: MessageSenderLike | null | undefined,
+  expectedExtensionId: string,
+  hostWindowId: number,
+): boolean {
+  if (
+    sender?.id !== expectedExtensionId
+    || sender.tab?.windowId !== hostWindowId
+  ) {
+    return false;
+  }
+
+  const isExactFloatPanelUrl = (value: unknown): boolean => {
+    if (typeof value !== 'string') return false;
+    try {
+      const url = new URL(value);
+      return url.protocol === 'chrome-extension:'
+        && url.host === expectedExtensionId
+        && url.pathname === '/floatpanel.html';
+    } catch {
+      return false;
+    }
+  };
+
+  return isExactFloatPanelUrl(sender.url)
+    && isExactFloatPanelUrl(sender.tab.url);
+}
+
 /**
  * Which trust class a protocol message type requires.
  *
@@ -180,6 +211,10 @@ export function trustClassForMessageType(
     case 'surface.switch.request':
     case 'surface.bootstrap':
     case 'surface.ready':
+    case 'pip.opened':
+    case 'pip.ready':
+    case 'pip.closed':
+    case 'pip.returnToSidePanel':
       return 'privileged-ui-page';
     case 'activity.broadcast':
     case 'events.changed':

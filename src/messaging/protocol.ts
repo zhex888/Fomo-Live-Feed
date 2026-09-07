@@ -42,6 +42,7 @@ const MAX_TRANSLATION_TEXT_LENGTH = 2_000;
 const MAX_TRANSLATION_ID_LENGTH = 128;
 const MAX_TRANSLATION_LANGUAGE_LENGTH = 16;
 const MAX_SWITCH_ID_LENGTH = 128;
+const MAX_PIP_SESSION_ID_LENGTH = 128;
 
 export const SURFACE_KEYS = ['sidepanel', 'floating'] as const;
 export type SurfaceKey = (typeof SURFACE_KEYS)[number];
@@ -49,12 +50,19 @@ export type SurfaceKey = (typeof SURFACE_KEYS)[number];
 export const SURFACE_SWITCH_FAILURES = [
   'switch-in-progress',
   'target-open-failed',
+  'target-close-failed',
   'target-ready-timeout',
   'stale-switch',
   'source-close-failed',
   'state-persist-failed',
 ] as const;
 export type SurfaceSwitchFailure = (typeof SURFACE_SWITCH_FAILURES)[number];
+
+export const PIP_CLOSE_REASONS = [
+  'native-close',
+  'return-to-sidepanel',
+  'mount-failed',
+] as const;
 
 const CHAIN_KEYS = [
   'bsc',
@@ -220,6 +228,7 @@ const surfaceSwitchRequestPayloadSchema = z
     source: z.enum(SURFACE_KEYS),
     target: z.enum(SURFACE_KEYS),
     sourceWindowId: z.number().int().nonnegative(),
+    instanceToken: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
   })
   .strict()
   .refine(({ source, target }) => source !== target, {
@@ -230,6 +239,7 @@ const surfaceBootstrapPayloadSchema = z
   .object({
     surface: z.enum(SURFACE_KEYS),
     windowId: z.number().int().nonnegative(),
+    instanceToken: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
   })
   .strict();
 
@@ -238,6 +248,8 @@ const surfaceReadyPayloadSchema = z
     switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
     surface: z.enum(SURFACE_KEYS),
     eventWatermark: z.number().int().nonnegative(),
+    windowId: z.number().int().nonnegative(),
+    instanceToken: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
   })
   .strict();
 
@@ -255,6 +267,24 @@ const surfaceSwitchStartedPayloadSchema = z.object({
   switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
   target: z.enum(SURFACE_KEYS),
 }).strict();
+
+const pipSessionPayloadSchema = z.object({
+  sessionId: trimmedBoundedString(MAX_PIP_SESSION_ID_LENGTH),
+  hostWindowId: z.number().int().nonnegative(),
+}).strict();
+
+const pipReadyPayloadSchema = pipSessionPayloadSchema.extend({
+  eventWatermark: z.number().int().nonnegative(),
+});
+
+const pipClosedPayloadSchema = pipSessionPayloadSchema.extend({
+  reason: z.enum(PIP_CLOSE_REASONS),
+});
+
+const pipReturnToSidePanelPayloadSchema = pipSessionPayloadSchema.extend({
+  ownerWindowId: z.number().int().nonnegative(),
+  switchId: trimmedBoundedString(MAX_SWITCH_ID_LENGTH),
+});
 
 // Versioned, discriminated message union for every extension context. Keep the
 // branch list in KNOWN_MESSAGE_TYPES in sync with this union.
@@ -389,6 +419,26 @@ export const extensionMessageSchema = z.discriminatedUnion('type', [
     protocolVersion: z.literal(PROTOCOL_VERSION),
     type: z.literal('surface.switch.started'),
     payload: surfaceSwitchStartedPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('pip.opened'),
+    payload: pipSessionPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('pip.ready'),
+    payload: pipReadyPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('pip.closed'),
+    payload: pipClosedPayloadSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: z.literal(PROTOCOL_VERSION),
+    type: z.literal('pip.returnToSidePanel'),
+    payload: pipReturnToSidePanelPayloadSchema,
   }).strict(),
   z.object({
     protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -599,12 +649,21 @@ const KNOWN_MESSAGE_TYPES = [
   'surface.ready',
   'surface.switch.changed',
   'surface.switch.started',
+  'pip.opened',
+  'pip.ready',
+  'pip.closed',
+  'pip.returnToSidePanel',
   'capture.ping',
   'navigation.openToken',
   'translation.request',
   'translation.ready',
   'translation.hostReady',
 ] as const satisfies readonly ExtensionMessage['type'][];
+
+type AssertNever<T extends never> = T;
+type _KnownMessageTypesAreExhaustive = AssertNever<
+  Exclude<ExtensionMessage['type'], (typeof KNOWN_MESSAGE_TYPES)[number]>
+>;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);

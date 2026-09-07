@@ -4,6 +4,7 @@ import {
   DEFAULT_FLOAT_GEOMETRY,
   FLOAT_GEOMETRY_STORAGE_KEY,
   FLOAT_OWNER_WINDOW_ID_SESSION_KEY,
+  PIP_SESSION_STORAGE_KEY,
   FLOAT_WINDOW_ID_SESSION_KEY,
   FloatWindowManager,
   parseFloatGeometry,
@@ -12,8 +13,14 @@ import {
 
 class InMemoryArea {
   private readonly items = new Map<string, unknown>();
+  private getFailures = 0;
+  private setFailures = 0;
 
   async get(keys: string[]): Promise<Record<string, unknown>> {
+    if (this.getFailures > 0) {
+      this.getFailures -= 1;
+      throw new Error('get failed');
+    }
     const result: Record<string, unknown> = {};
     for (const key of keys) {
       if (this.items.has(key)) {
@@ -24,6 +31,10 @@ class InMemoryArea {
   }
 
   async set(items: Record<string, unknown>): Promise<void> {
+    if (this.setFailures > 0) {
+      this.setFailures -= 1;
+      throw new Error('set failed');
+    }
     for (const [key, value] of Object.entries(items)) {
       this.items.set(key, value);
     }
@@ -35,6 +46,14 @@ class InMemoryArea {
     }
   }
 
+  failNextGet(): void {
+    this.getFailures += 1;
+  }
+
+  failNextSet(): void {
+    this.setFailures += 1;
+  }
+
   snapshot(): Record<string, unknown> {
     return Object.fromEntries(this.items);
   }
@@ -42,6 +61,7 @@ class InMemoryArea {
 
 interface FakeWindow {
   id: number;
+  state?: 'normal' | 'minimized' | undefined;
   width?: number | undefined;
   height?: number | undefined;
   left?: number | undefined;
@@ -50,15 +70,38 @@ interface FakeWindow {
 
 function createHarness(options: {
   failCreate?: boolean;
+  failUpdate?: boolean;
+  failUpdateTimes?: number;
+  failRemove?: boolean;
+  beforeRemove?: () => Promise<void>;
+  beforeSessionSet?: (items: Record<string, unknown>) => Promise<void>;
   beforeCreate?: () => Promise<void>;
 } = {}) {
-  const session = new InMemoryArea();
+  const sessionStorage = new InMemoryArea();
+  const sessionGetCalls: string[][] = [];
+  const session = {
+    get(keys: string[]) {
+      sessionGetCalls.push(keys);
+      return sessionStorage.get(keys);
+    },
+    async set(items: Record<string, unknown>) {
+      await options.beforeSessionSet?.(items);
+      await sessionStorage.set(items);
+    },
+    seed: (items: Record<string, unknown>) => sessionStorage.seed(items),
+    snapshot: () => sessionStorage.snapshot(),
+    failNextGet: () => sessionStorage.failNextGet(),
+    failNextSet: () => sessionStorage.failNextSet(),
+  };
   const local = new InMemoryArea();
   const liveWindows = new Map<number, FakeWindow>();
   let nextWindowId = 500;
   const createCalls: Array<Record<string, unknown>> = [];
   const focusCalls: number[] = [];
+  const updateCalls: Array<{ windowId: number; update: Record<string, unknown> }> = [];
+  const pipSessionsAtUpdate: unknown[] = [];
   const removeCalls: number[] = [];
+  let updateFailures = options.failUpdateTimes ?? (options.failUpdate ? Number.POSITIVE_INFINITY : 0);
 
   const chrome: FloatWindowChrome = {
     windows: {
@@ -70,6 +113,7 @@ function createHarness(options: {
         }
         const win: FakeWindow = {
           id: nextWindowId++,
+          state: 'normal',
           width: create.width,
           height: create.height,
           left: create.left,
@@ -85,16 +129,32 @@ function createHarness(options: {
         }
         return win;
       },
-      async update(windowId) {
+      async update(windowId, update) {
         if (!liveWindows.has(windowId)) {
           throw new Error('window not found');
         }
-        focusCalls.push(windowId);
+        updateCalls.push({ windowId, update });
+        pipSessionsAtUpdate.push(session.snapshot()[PIP_SESSION_STORAGE_KEY]);
+        if (updateFailures > 0) {
+          updateFailures -= 1;
+          throw new Error('update failed');
+        }
+        if ('state' in update) {
+          const win = liveWindows.get(windowId);
+          if (win !== undefined) win.state = update.state;
+        }
+        if ('focused' in update && update.focused === true && !('state' in update)) {
+          focusCalls.push(windowId);
+        }
         return {};
       },
       async remove(windowId) {
         if (!liveWindows.has(windowId)) {
           throw new Error('window not found');
+        }
+        await options.beforeRemove?.();
+        if (options.failRemove) {
+          throw new Error('remove failed');
         }
         removeCalls.push(windowId);
         liveWindows.delete(windowId);
@@ -107,7 +167,19 @@ function createHarness(options: {
 
   const manager = new FloatWindowManager(chrome, { session, local });
 
-  return { manager, session, local, liveWindows, createCalls, focusCalls, removeCalls };
+  return {
+    manager,
+    chrome,
+    session,
+    sessionGetCalls,
+    local,
+    liveWindows,
+    createCalls,
+    focusCalls,
+    updateCalls,
+    pipSessionsAtUpdate,
+    removeCalls,
+  };
 }
 
 describe('parseFloatGeometry', () => {
@@ -311,6 +383,76 @@ describe('FloatWindowManager.openOrFocus', () => {
 });
 
 describe('FloatWindowManager.close', () => {
+  it('persists and guards the floating host generation used by a switch', async () => {
+    const harness = createHarness();
+    const generationManager = harness.manager as FloatWindowManager & {
+      openOrFocus(ownerWindowId: number, instanceToken: string): Promise<{
+        ok: true;
+        windowId: number;
+      }>;
+      closeExpectedWindow(hostWindowId: number, instanceToken: string): Promise<boolean>;
+    };
+    const opened = await generationManager.openOrFocus(77, 'switch-original');
+    if (!opened.ok) throw new Error('expected generated open');
+    expect(harness.session.snapshot()['floatWindow.instanceToken.v1']).toBe('switch-original');
+    harness.session.seed({ 'floatWindow.instanceToken.v1': 'switch-replacement' });
+
+    await expect(generationManager.closeExpectedWindow(
+      opened.windowId,
+      'switch-original',
+    )).resolves.toBe(true);
+    expect(harness.liveWindows.has(opened.windowId)).toBe(true);
+    expect(harness.removeCalls).toEqual([]);
+  });
+
+  it('does not close a replacement PiP host when reconciling an older session', async () => {
+    const harness = createHarness();
+    const original = await harness.manager.openOrFocus(77);
+    if (!original.ok) throw new Error('expected original open');
+    await harness.manager.registerPipOpened(original.windowId, 'pip-original');
+    await harness.manager.close();
+
+    const replacement = await harness.manager.openOrFocus(88);
+    if (!replacement.ok) throw new Error('expected replacement open');
+    await harness.manager.registerPipOpened(replacement.windowId, 'pip-replacement');
+    const guardedManager = harness.manager as FloatWindowManager & {
+      closeExpectedPip(hostWindowId: number, sessionId: string): Promise<boolean>;
+    };
+
+    await expect(guardedManager.closeExpectedPip(
+      original.windowId,
+      'pip-original',
+    )).resolves.toBe(true);
+    expect(harness.removeCalls).toEqual([original.windowId]);
+    expect(harness.liveWindows.has(replacement.windowId)).toBe(true);
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: replacement.windowId,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 88,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-replacement',
+        hostWindowId: replacement.windowId,
+        phase: 'opened',
+      },
+    });
+  });
+
+  it('does not close a replacement floating host when reconciling an older target', async () => {
+    const harness = createHarness();
+    const original = await harness.manager.openOrFocus(77, 'target-original');
+    if (!original.ok) throw new Error('expected original open');
+    await harness.manager.close();
+    const replacement = await harness.manager.openOrFocus(88);
+    if (!replacement.ok) throw new Error('expected replacement open');
+
+    await expect(harness.manager.closeExpectedWindow(
+      original.windowId,
+      'target-original',
+    )).resolves.toBe(true);
+    expect(harness.removeCalls).toEqual([original.windowId]);
+    expect(harness.liveWindows.has(replacement.windowId)).toBe(true);
+    expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(replacement.windowId);
+  });
+
   it('closes the active floating window and clears its session id', async () => {
     const { manager, session, removeCalls } = createHarness();
     const opened = await manager.openOrFocus();
@@ -322,12 +464,195 @@ describe('FloatWindowManager.close', () => {
     expect(session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
   });
 
+  it('reports a confirmed removal when session cleanup fails and recovers stale keys on open', async () => {
+    const harness = createHarness();
+    const opened = await harness.manager.openOrFocus(77);
+    if (!opened.ok) throw new Error('expected open');
+    await harness.manager.registerPipOpened(opened.windowId, 'pip-close-cleanup');
+    harness.session.failNextSet();
+
+    await expect(harness.manager.close()).resolves.toBe(true);
+    expect(harness.liveWindows.has(opened.windowId)).toBe(false);
+    expect(harness.manager.cachedOwnerWindowId()).toBeUndefined();
+    expect(harness.manager.cachedPipSessionMatches(
+      opened.windowId,
+      'pip-close-cleanup',
+    )).toBe(false);
+    expect(harness.manager.cachedPipReturnContextMatches(
+      opened.windowId,
+      'pip-close-cleanup',
+      77,
+    )).toBe(false);
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: opened.windowId,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-close-cleanup',
+        hostWindowId: opened.windowId,
+        phase: 'opened',
+      },
+    });
+
+    const reopened = await harness.manager.openOrFocus(88);
+    expect(reopened).toMatchObject({ ok: true, created: true });
+    if (!reopened.ok) throw new Error('expected reopen');
+    expect(reopened.windowId).not.toBe(opened.windowId);
+    expect(harness.createCalls).toHaveLength(2);
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: reopened.windowId,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 88,
+      [PIP_SESSION_STORAGE_KEY]: -1,
+    });
+  });
+
   it('treats a missing or stale window as already closed', async () => {
     const { manager, session } = createHarness();
     session.seed({ [FLOAT_WINDOW_ID_SESSION_KEY]: 404 });
 
     await expect(manager.close()).resolves.toBe(true);
     expect(session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+  });
+
+  it('reports a get-confirmed missing window even when session cleanup fails', async () => {
+    const { manager, session } = createHarness();
+    session.seed({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: 404,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'stale-pip',
+        hostWindowId: 404,
+        phase: 'ready',
+      },
+    });
+    session.failNextSet();
+
+    await expect(manager.close()).resolves.toBe(true);
+    expect(session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: 404,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'stale-pip',
+        hostWindowId: 404,
+        phase: 'ready',
+      },
+    });
+  });
+
+  it('waits for an in-flight open to persist its host before closing it', async () => {
+    let releaseHostWrite: (() => void) | undefined;
+    let signalHostWrite: (() => void) | undefined;
+    const hostWriteStarted = new Promise<void>((resolve) => {
+      signalHostWrite = resolve;
+    });
+    const hostWriteGate = new Promise<void>((resolve) => {
+      releaseHostWrite = resolve;
+    });
+    let gated = false;
+    const harness = createHarness({
+      async beforeSessionSet(items) {
+        const value = items[FLOAT_WINDOW_ID_SESSION_KEY];
+        if (!gated && typeof value === 'number' && value >= 0) {
+          gated = true;
+          signalHostWrite?.();
+          await hostWriteGate;
+        }
+      },
+    });
+
+    const open = harness.manager.openOrFocus();
+    await hostWriteStarted;
+    const close = harness.manager.close();
+    releaseHostWrite?.();
+
+    const opened = await open;
+    if (!opened.ok) throw new Error('expected open');
+    await expect(close).resolves.toBe(true);
+    expect(harness.removeCalls).toEqual([opened.windowId]);
+    expect(harness.liveWindows.has(opened.windowId)).toBe(false);
+    expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+  });
+
+  it('waits for close cleanup before opening and preserves the new host id', async () => {
+    let releaseCloseClear: (() => void) | undefined;
+    let signalCloseClear: (() => void) | undefined;
+    const closeClearStarted = new Promise<void>((resolve) => {
+      signalCloseClear = resolve;
+    });
+    const closeClearGate = new Promise<void>((resolve) => {
+      releaseCloseClear = resolve;
+    });
+    let gated = false;
+    const harness = createHarness({
+      async beforeSessionSet(items) {
+        if (!gated && items[FLOAT_WINDOW_ID_SESSION_KEY] === -1) {
+          gated = true;
+          signalCloseClear?.();
+          await closeClearGate;
+        }
+      },
+    });
+    const first = await harness.manager.openOrFocus();
+    if (!first.ok) throw new Error('expected first open');
+
+    const close = harness.manager.close();
+    await closeClearStarted;
+    const readsBeforeReopen = harness.sessionGetCalls.length;
+    const reopen = harness.manager.openOrFocus();
+    expect(harness.sessionGetCalls).toHaveLength(readsBeforeReopen);
+    releaseCloseClear?.();
+
+    await expect(close).resolves.toBe(true);
+    const reopened = await reopen;
+    if (!reopened.ok) throw new Error('expected reopen');
+    expect(reopened.created).toBe(true);
+    expect(reopened.windowId).not.toBe(first.windowId);
+    expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(reopened.windowId);
+    expect(harness.liveWindows.has(reopened.windowId)).toBe(true);
+  });
+
+  it('starts a new owned open after a close barrier instead of reusing the stalled request', async () => {
+    let releaseFirstHostWrite: (() => void) | undefined;
+    let signalFirstHostWrite: (() => void) | undefined;
+    const firstHostWriteStarted = new Promise<void>((resolve) => {
+      signalFirstHostWrite = resolve;
+    });
+    const firstHostWriteGate = new Promise<void>((resolve) => {
+      releaseFirstHostWrite = resolve;
+    });
+    let gated = false;
+    const harness = createHarness({
+      async beforeSessionSet(items) {
+        const value = items[FLOAT_WINDOW_ID_SESSION_KEY];
+        if (!gated && typeof value === 'number' && value >= 0) {
+          gated = true;
+          signalFirstHostWrite?.();
+          await firstHostWriteGate;
+        }
+      },
+    });
+
+    const firstOpen = harness.manager.openOrFocus(11);
+    await firstHostWriteStarted;
+    const close = harness.manager.close();
+    const secondOpen = harness.manager.openOrFocus(22);
+    expect(secondOpen).not.toBe(firstOpen);
+    releaseFirstHostWrite?.();
+
+    const first = await firstOpen;
+    if (!first.ok) throw new Error('expected first open');
+    await expect(close).resolves.toBe(true);
+    const second = await secondOpen;
+    if (!second.ok) throw new Error('expected second open');
+
+    expect(second.created).toBe(true);
+    expect(second.windowId).not.toBe(first.windowId);
+    expect(harness.removeCalls).toEqual([first.windowId]);
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: second.windowId,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 22,
+    });
+    expect(harness.liveWindows.has(first.windowId)).toBe(false);
+    expect(harness.liveWindows.has(second.windowId)).toBe(true);
   });
 });
 
@@ -347,5 +672,777 @@ describe('FloatWindowManager owner window', () => {
     expect(manager.cachedOwnerWindowId()).toBeUndefined();
     await expect(manager.ownerWindowId()).resolves.toBe(88);
     expect(manager.cachedOwnerWindowId()).toBe(88);
+  });
+
+  it('preserves the original owner when another browser window focuses the live host', async () => {
+    const harness = createHarness();
+    const opened = await harness.manager.openOrFocus(77);
+    if (!opened.ok) throw new Error('expected open');
+    await harness.manager.registerPipOpened(opened.windowId, 'pip-original-owner');
+
+    await expect(harness.manager.openOrFocus(88)).resolves.toEqual({
+      ok: true,
+      windowId: opened.windowId,
+      created: false,
+    });
+
+    expect(harness.createCalls).toHaveLength(1);
+    expect(harness.session.snapshot()[FLOAT_OWNER_WINDOW_ID_SESSION_KEY]).toBe(77);
+    expect(harness.manager.cachedPipReturnContextMatches(
+      opened.windowId,
+      'pip-original-owner',
+      77,
+    )).toBe(true);
+  });
+
+  it('restores the original owner when another browser window focuses the host after restart', async () => {
+    const harness = createHarness();
+    const opened = await harness.manager.openOrFocus(77);
+    if (!opened.ok) throw new Error('expected open');
+    await harness.manager.registerPipOpened(opened.windowId, 'pip-after-restart');
+
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(restartedManager.cachedPipReturnContextMatches(
+      opened.windowId,
+      'pip-after-restart',
+      77,
+    )).toBe(true);
+
+    await expect(restartedManager.openOrFocus(88)).resolves.toEqual({
+      ok: true,
+      windowId: opened.windowId,
+      created: false,
+    });
+
+    expect(harness.createCalls).toHaveLength(1);
+    expect(harness.session.snapshot()[FLOAT_OWNER_WINDOW_ID_SESSION_KEY]).toBe(77);
+    expect(restartedManager.cachedPipReturnContextMatches(
+      opened.windowId,
+      'pip-after-restart',
+      77,
+    )).toBe(true);
+  });
+});
+
+describe('FloatWindowManager PiP session', () => {
+  async function openHost(harness: ReturnType<typeof createHarness>): Promise<number> {
+    const opened = await harness.manager.openOrFocus(77);
+    if (!opened.ok) throw new Error('expected open');
+    return opened.windowId;
+  }
+
+  it('registers a PiP session only for the currently tracked float host', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+
+    await expect(harness.manager.registerPipOpened(hostWindowId + 1, 'pip-1')).resolves.toEqual({
+      ok: false,
+      reason: 'host-mismatch',
+    });
+    expect(harness.session.snapshot()).not.toHaveProperty(PIP_SESSION_STORAGE_KEY);
+
+    await expect(harness.manager.registerPipOpened(hostWindowId, 'pip-1')).resolves.toEqual({
+      ok: true,
+      created: true,
+      ownerWindowId: 77,
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toEqual({
+      sessionId: 'pip-1',
+      hostWindowId,
+      phase: 'opened',
+    });
+  });
+
+  it('returns the original owner and rejects registration when it is missing', async () => {
+    const harness = createHarness();
+    const opened = await harness.manager.openOrFocus();
+    if (!opened.ok) throw new Error('expected open');
+
+    await expect(
+      harness.manager.registerPipOpened(opened.windowId, 'pip-without-owner'),
+    ).resolves.toEqual({ ok: false, reason: 'owner-missing' });
+    expect(harness.session.snapshot()).not.toHaveProperty(PIP_SESSION_STORAGE_KEY);
+  });
+
+  it('adopts one trusted cold return context without overwriting a different cache', async () => {
+    const harness = createHarness();
+
+    expect(harness.manager.adoptTrustedColdReturnContext(900, 'pip-cold', 77)).toBe(true);
+    expect(harness.manager.cachedPipReturnContextMatches(900, 'pip-cold', 77)).toBe(true);
+    expect(harness.manager.adoptTrustedColdReturnContext(900, 'pip-other', 77)).toBe(false);
+    expect(harness.manager.adoptTrustedColdReturnContext(900, 'pip-cold', 88)).toBe(false);
+    expect(harness.manager.cachedPipReturnContextMatches(900, 'pip-cold', 77)).toBe(true);
+    expect(harness.session.snapshot()).not.toHaveProperty(PIP_SESSION_STORAGE_KEY);
+  });
+
+  it('never overwrites a confirmed live session with a cold return context', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-live');
+
+    expect(
+      harness.manager.adoptTrustedColdReturnContext(hostWindowId, 'pip-stale', 77),
+    ).toBe(false);
+    expect(
+      harness.manager.adoptTrustedColdReturnContext(hostWindowId, 'pip-live', 77),
+    ).toBe(true);
+    await expect(
+      harness.manager.registerPipOpened(hostWindowId, 'pip-stale'),
+    ).resolves.toEqual({ ok: false, reason: 'session-conflict' });
+    expect(harness.manager.cachedPipReturnContextMatches(hostWindowId, 'pip-live', 77)).toBe(true);
+  });
+
+  it('rejects a second active session but treats the same registration as idempotent', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await expect(harness.manager.registerPipOpened(hostWindowId, 'pip-2')).resolves.toEqual({
+      ok: false,
+      reason: 'session-conflict',
+    });
+    await expect(harness.manager.registerPipOpened(hostWindowId, 'pip-1')).resolves.toEqual({
+      ok: true,
+      created: false,
+      ownerWindowId: 77,
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-1',
+      phase: 'opened',
+    });
+  });
+
+  it('serializes concurrent registrations so only one different token is created', async () => {
+    let releaseFirstPipWrite: (() => void) | undefined;
+    let signalFirstPipWrite: (() => void) | undefined;
+    const firstPipWriteStarted = new Promise<void>((resolve) => {
+      signalFirstPipWrite = resolve;
+    });
+    const firstPipWriteGate = new Promise<void>((resolve) => {
+      releaseFirstPipWrite = resolve;
+    });
+    let gated = false;
+    const harness = createHarness({
+      async beforeSessionSet(items) {
+        const value = items[PIP_SESSION_STORAGE_KEY];
+        if (!gated && typeof value === 'object' && value !== null) {
+          gated = true;
+          signalFirstPipWrite?.();
+          await firstPipWriteGate;
+        }
+      },
+    });
+    const hostWindowId = await openHost(harness);
+
+    const first = harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    await firstPipWriteStarted;
+    const second = harness.manager.registerPipOpened(hostWindowId, 'pip-2');
+    await Promise.resolve();
+    releaseFirstPipWrite?.();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { ok: true, created: true, ownerWindowId: 77 },
+      { ok: false, reason: 'session-conflict' },
+    ]);
+  });
+
+  it('persists ready before minimizing the matching host', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await expect(harness.manager.markPipReady(hostWindowId, 'pip-1')).resolves.toEqual({
+      ok: true,
+      minimized: true,
+    });
+    expect(harness.updateCalls.at(-1)).toEqual({
+      windowId: hostWindowId,
+      update: { state: 'minimized' },
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toEqual({
+      sessionId: 'pip-1',
+      hostWindowId,
+      phase: 'ready',
+    });
+    expect(harness.pipSessionsAtUpdate.at(-1)).toMatchObject({ phase: 'ready' });
+  });
+
+  it('maintains an exact synchronous cache for the live PiP session', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(false);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(true);
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-old')).toBe(false);
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId + 1, 'pip-1')).toBe(false);
+
+    await harness.manager.markPipReady(hostWindowId, 'pip-1');
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(true);
+  });
+
+  it('keeps the ready session when minimizing the host fails', async () => {
+    const harness = createHarness({ failUpdate: true });
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await expect(harness.manager.markPipReady(hostWindowId, 'pip-1')).resolves.toEqual({
+      ok: true,
+      minimized: false,
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-1',
+      phase: 'ready',
+    });
+  });
+
+  it('ignores stale ready events without changing the active session', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-new');
+
+    await expect(harness.manager.markPipReady(hostWindowId, 'pip-old')).resolves.toEqual({
+      ok: false,
+      reason: 'session-mismatch',
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-new',
+      phase: 'opened',
+    });
+  });
+
+  it('rejects ready from a different host even when the session token matches', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await expect(harness.manager.markPipReady(hostWindowId + 1, 'pip-1')).resolves.toEqual({
+      ok: false,
+      reason: 'host-mismatch',
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-1',
+      hostWindowId,
+      phase: 'opened',
+    });
+    expect(harness.updateCalls).toHaveLength(0);
+  });
+
+  it('clears a matching native-close session and restores the host', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await expect(
+      harness.manager.handlePipClosed(hostWindowId, 'pip-1', 'native-close'),
+    ).resolves.toEqual({ ok: true, restored: true });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+    expect(harness.updateCalls.at(-1)).toEqual({
+      windowId: hostWindowId,
+      update: { state: 'normal', focused: true },
+    });
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(false);
+  });
+
+  it('restores mount failures and matching return closes', async () => {
+    const mountHarness = createHarness();
+    const mountHostWindowId = await openHost(mountHarness);
+    await mountHarness.manager.registerPipOpened(mountHostWindowId, 'pip-mount');
+
+    await expect(
+      mountHarness.manager.handlePipClosed(mountHostWindowId, 'pip-mount', 'mount-failed'),
+    ).resolves.toEqual({ ok: true, restored: true });
+    expect(mountHarness.updateCalls.at(-1)).toEqual({
+      windowId: mountHostWindowId,
+      update: { state: 'normal', focused: true },
+    });
+
+    const returnHarness = createHarness();
+    const returnHostWindowId = await openHost(returnHarness);
+    await returnHarness.manager.registerPipOpened(returnHostWindowId, 'pip-return');
+
+    await expect(
+      returnHarness.manager.handlePipClosed(
+        returnHostWindowId,
+        'pip-return',
+        'return-to-sidepanel',
+      ),
+    ).resolves.toEqual({ ok: true, restored: true });
+    expect(returnHarness.updateCalls.at(-1)).toEqual({
+      windowId: returnHostWindowId,
+      update: { state: 'normal', focused: true },
+    });
+    expect(returnHarness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+    expect(
+      returnHarness.manager.cachedPipSessionMatches(returnHostWindowId, 'pip-return'),
+    ).toBe(false);
+  });
+
+  it('keeps a closed token retryable until host restoration succeeds', async () => {
+    const harness = createHarness({ failUpdateTimes: 1 });
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await expect(
+      harness.manager.handlePipClosed(hostWindowId, 'pip-1', 'native-close'),
+    ).resolves.toEqual({ ok: false, reason: 'chrome-api-failed' });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-1',
+    });
+
+    await expect(
+      harness.manager.handlePipClosed(hostWindowId, 'pip-1', 'native-close'),
+    ).resolves.toEqual({ ok: true, restored: true });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('does not let ready race behind close and recreate a cleared session', async () => {
+    let releaseRemove: (() => void) | undefined;
+    let signalRemove: (() => void) | undefined;
+    const removeStarted = new Promise<void>((resolve) => {
+      signalRemove = resolve;
+    });
+    const removeGate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    const harness = createHarness({
+      async beforeRemove() {
+        signalRemove?.();
+        await removeGate;
+      },
+    });
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    const close = harness.manager.close();
+    await removeStarted;
+    const ready = harness.manager.markPipReady(hostWindowId, 'pip-1');
+    releaseRemove?.();
+
+    await expect(close).resolves.toBe(true);
+    await expect(ready).resolves.toEqual({ ok: false, reason: 'host-mismatch' });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+    expect(harness.updateCalls).toHaveLength(0);
+  });
+
+  it('ignores stale close events without changing the new session', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-new');
+
+    await expect(
+      harness.manager.handlePipClosed(hostWindowId, 'pip-old', 'native-close'),
+    ).resolves.toEqual({ ok: false, reason: 'session-mismatch' });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-new',
+    });
+  });
+
+  it('clears host and PiP session when the host is removed', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await harness.manager.handleWindowRemoved(hostWindowId);
+
+    expect(harness.session.snapshot()[FLOAT_WINDOW_ID_SESSION_KEY]).toBe(-1);
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+    expect(harness.manager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(false);
+  });
+
+  it('invalidates the old PiP token when a missing host is replaced', async () => {
+    const harness = createHarness();
+    const oldHostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(oldHostWindowId, 'pip-old');
+    harness.liveWindows.delete(oldHostWindowId);
+
+    await expect(harness.manager.openOrFocus()).resolves.toMatchObject({
+      ok: true,
+      created: true,
+    });
+    expect(harness.manager.cachedPipSessionMatches(oldHostWindowId, 'pip-old')).toBe(false);
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('close clears host, owner, and PiP session', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.openOrFocus(77);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+
+    await harness.manager.close();
+
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: -1,
+      [PIP_SESSION_STORAGE_KEY]: -1,
+    });
+  });
+
+  it('preserves all tracked state when close cannot read session storage', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.openOrFocus(77);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    const before = harness.session.snapshot();
+    harness.session.failNextGet();
+
+    await expect(harness.manager.close()).resolves.toBe(false);
+    expect(harness.session.snapshot()).toEqual(before);
+    expect(harness.liveWindows.has(hostWindowId)).toBe(true);
+  });
+
+  it('preserves tracked state when close confirms a failed removal left the host live', async () => {
+    const harness = createHarness({ failRemove: true });
+    const hostWindowId = await openHost(harness);
+    await harness.manager.openOrFocus(77);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    const before = harness.session.snapshot();
+
+    await expect(harness.manager.close()).resolves.toBe(false);
+    expect(harness.session.snapshot()).toEqual(before);
+
+    await expect(harness.manager.openOrFocus()).resolves.toEqual({
+      ok: true,
+      windowId: hostWindowId,
+      created: false,
+    });
+    expect(harness.createCalls).toHaveLength(1);
+  });
+
+  it('parses a stored session after worker restart and clears invalid records', async () => {
+    const validHarness = createHarness();
+    const hostWindowId = await openHost(validHarness);
+    await validHarness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    await validHarness.manager.markPipReady(hostWindowId, 'pip-1');
+    const restartedManager = new FloatWindowManager(validHarness.chrome, {
+      session: validHarness.session,
+      local: validHarness.local,
+    });
+
+    await expect(restartedManager.activePipSession()).resolves.toEqual({
+      ok: true,
+      session: {
+        sessionId: 'pip-1',
+        hostWindowId,
+        phase: 'ready',
+      },
+    });
+
+    const invalidHarness = createHarness();
+    const invalidHostWindowId = await openHost(invalidHarness);
+    invalidHarness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: '',
+        hostWindowId: invalidHostWindowId,
+        phase: 'ready',
+      },
+    });
+    const restartedInvalidManager = new FloatWindowManager(invalidHarness.chrome, {
+      session: invalidHarness.session,
+      local: invalidHarness.local,
+    });
+
+    await expect(restartedInvalidManager.activePipSession()).resolves.toEqual({ ok: true });
+    expect(invalidHarness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('clears a stored session whose host does not match the tracked host after restart', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    harness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-orphan',
+        hostWindowId: hostWindowId + 1,
+        phase: 'ready',
+      },
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.activePipSession()).resolves.toEqual({ ok: true });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('distinguishes active-session storage failures from an empty session', async () => {
+    const getFailureHarness = createHarness();
+    getFailureHarness.session.failNextGet();
+    await expect(getFailureHarness.manager.activePipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'chrome-api-failed',
+    });
+
+    const cleanupFailureHarness = createHarness();
+    cleanupFailureHarness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: { sessionId: '', hostWindowId: 1, phase: 'opened' },
+    });
+    cleanupFailureHarness.session.failNextSet();
+    await expect(cleanupFailureHarness.manager.activePipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'chrome-api-failed',
+    });
+  });
+
+  it('clears an orphaned stored session when its host is not tracked', async () => {
+    const harness = createHarness();
+    harness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-1',
+        hostWindowId: 42,
+        phase: 'opened',
+      },
+    });
+
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'host-mismatch',
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('hydrates matching PiP and owner caches without changing a live host', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    harness.session.seed({
+      [FLOAT_OWNER_WINDOW_ID_SESSION_KEY]: 77,
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-1',
+        hostWindowId,
+        phase: 'opened',
+      },
+    });
+
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(harness.updateCalls).toEqual([]);
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-1',
+    });
+    expect(restartedManager.cachedPipSessionMatches(hostWindowId, 'pip-1')).toBe(true);
+    expect(restartedManager.cachedOwnerWindowId()).toBe(77);
+  });
+
+  it('allows a new opened token to replace only a restart-hydrated session', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-stale');
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+    await restartedManager.recoverStoredPipSession();
+
+    await expect(
+      restartedManager.registerPipOpened(hostWindowId, ''),
+    ).resolves.toEqual({ ok: false, reason: 'session-conflict' });
+    await expect(
+      restartedManager.registerPipOpened(hostWindowId, 'pip-new'),
+    ).resolves.toEqual({ ok: true, created: true, ownerWindowId: 77 });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-new',
+      phase: 'opened',
+    });
+
+    await expect(
+      restartedManager.registerPipOpened(hostWindowId, 'pip-other'),
+    ).resolves.toEqual({ ok: false, reason: 'session-conflict' });
+  });
+
+  it('confirms a restart-hydrated token when the same session opens again', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-live');
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+    await restartedManager.recoverStoredPipSession();
+
+    await expect(
+      restartedManager.registerPipOpened(hostWindowId, 'pip-live'),
+    ).resolves.toEqual({ ok: true, created: false, ownerWindowId: 77 });
+    await expect(
+      restartedManager.registerPipOpened(hostWindowId, 'pip-other'),
+    ).resolves.toEqual({ ok: false, reason: 'session-conflict' });
+  });
+
+  it('clears the tracked host and PiP token when recovery finds the host gone', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    await harness.manager.registerPipOpened(hostWindowId, 'pip-1');
+    harness.liveWindows.delete(hostWindowId);
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'host-missing',
+    });
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+      [PIP_SESSION_STORAGE_KEY]: -1,
+    });
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['cleared', -1],
+  ])('clears a missing tracked host when the PiP token is %s', async (_label, token) => {
+    const harness = createHarness();
+    harness.session.seed({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: 42,
+      ...(token === undefined ? {} : { [PIP_SESSION_STORAGE_KEY]: token }),
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'host-missing',
+    });
+    expect(harness.session.snapshot()).toMatchObject({
+      [FLOAT_WINDOW_ID_SESSION_KEY]: -1,
+      [PIP_SESSION_STORAGE_KEY]: -1,
+    });
+  });
+
+  it('normalizes a live tracked host when the raw PiP record is invalid', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    harness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: '',
+        hostWindowId,
+        phase: 'ready',
+      },
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(harness.updateCalls.at(-1)).toEqual({
+      windowId: hostWindowId,
+      update: { state: 'normal' },
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('normalizes the actual tracked host when a valid PiP token names another host', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    harness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-mismatch',
+        hostWindowId: hostWindowId + 1,
+        phase: 'ready',
+      },
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(harness.updateCalls.at(-1)).toEqual({
+      windowId: hostWindowId,
+      update: { state: 'normal' },
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
+  });
+
+  it('does not infer PiP recovery from a minimized host without a token', async () => {
+    const harness = createHarness();
+    const hostWindowId = await openHost(harness);
+    const host = harness.liveWindows.get(hostWindowId);
+    if (host === undefined) throw new Error('expected host');
+    host.state = 'minimized';
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: false,
+    });
+    expect(harness.updateCalls).toEqual([]);
+  });
+
+  it('does not focus a normal live host without a PiP token on worker wake', async () => {
+    const harness = createHarness();
+    await openHost(harness);
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: false,
+    });
+    expect(harness.updateCalls).toEqual([]);
+  });
+
+  it('keeps a recovered token retryable until host restoration succeeds', async () => {
+    const harness = createHarness({ failUpdateTimes: 1 });
+    const hostWindowId = await openHost(harness);
+    harness.session.seed({
+      [PIP_SESSION_STORAGE_KEY]: {
+        sessionId: 'pip-mismatch',
+        hostWindowId: hostWindowId + 1,
+        phase: 'ready',
+      },
+    });
+    const restartedManager = new FloatWindowManager(harness.chrome, {
+      session: harness.session,
+      local: harness.local,
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: false,
+      reason: 'chrome-api-failed',
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toMatchObject({
+      sessionId: 'pip-mismatch',
+    });
+
+    await expect(restartedManager.recoverStoredPipSession()).resolves.toEqual({
+      ok: true,
+      recovered: true,
+    });
+    expect(harness.session.snapshot()[PIP_SESSION_STORAGE_KEY]).toBe(-1);
   });
 });

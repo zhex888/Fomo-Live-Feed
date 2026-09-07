@@ -4,9 +4,9 @@
 
 ## 简体中文
 
-Fomo Live Feed 是一款 Chrome 扩展，通过 Chrome 侧边栏或独立悬浮窗展示当前
-Fomo 登录用户所关注交易者的实时动态。扩展会在本地保存可搜索、可筛选的历史
-记录，不会在交易页面注入额外的浮动通知卡片。
+Fomo Live Feed 是一款 Chrome 扩展，通过 Chrome 侧边栏或始终置顶的画中画
+窗口展示当前 Fomo 登录用户所关注交易者的实时动态。扩展会在本地保存可搜索、
+可筛选的历史记录，不会在交易页面注入额外的浮动通知卡片。
 
 > **MVP 状态：**核心功能已经实现，并通过单元、集成及端到端测试。用于补充
 > 生产数据的 Fomo enrichment 与 REST backfill 适配器仍保持禁用，等待获取并
@@ -25,7 +25,9 @@ Fomo 登录用户所关注交易者的实时动态。扩展会在本地保存可
 3. 开启右上角的“开发者模式”。
 4. 点击“加载已解压的扩展程序”，选择刚刚解压的目录。
 5. 保持至少一个已登录的 Fomo 页面处于打开状态；扩展重新加载后会自动恢复监听。
-6. 点击扩展图标打开实时信息流；可在设置中选择侧边栏或悬浮窗。
+6. 点击扩展图标打开实时信息流；可在设置中选择侧边栏或悬浮模式。
+   首次进入悬浮模式时，小型激活宿主会要求再点击一次“将悬浮窗
+   保持在最前”；随后打开的文档画中画才是真正的始终置顶信息流。
 
 接收者无需安装此仓库、Node.js 或 pnpm。解压目录中的 `START-HERE.html`
 包含启动及故障排查清单。扩展要求 **Chrome 141 或更高版本**。
@@ -46,9 +48,11 @@ Fomo 登录用户所关注交易者的实时动态。扩展会在本地保存可
   重复事件、卖出、观点、转入和转出不会触发。
 - **Fomo 快捷跳转**：点击代币名称可复用现有 Fomo 标签页并打开对应链和合约的
   代币页面；无法构造可靠目标时保持普通文本。
-- **侧边栏 / 悬浮窗无缝切换**：两个界面共享后台连接、历史、筛选、设置与备注；
-  目标界面完成数据同步后才关闭原界面，任何时刻只保留一个界面。悬浮窗可自由调整
-  大小并记住位置，扩展重新加载后的 Fomo 监听也会限次自动恢复。
+- **侧边栏 / 始终置顶悬浮窗无缝切换**：两种模式共享后台连接、历史、
+  筛选、设置与备注。侧边栏先把数据同步给小型激活宿主，用户直接点击后再
+  打开 Document Picture-in-Picture；PiP 就绪后宿主最小化，任何时刻只保留一个
+  可交互信息流。PiP 可跨 Chrome 标签页保持在最前，不占用页面侧边宽度；返回
+  侧边栏、原生关闭恢复和扩展重载都会防止丢失或重复信息流。
 - **紧凑终端界面**：买入、卖出、观点等事件使用不同语义色边框；工具栏、筛选、
   设置、空状态和加载反馈采用统一的明暗主题设计，同时保持每屏信息密度。
 - **本地存储**：动态历史保存在 IndexedDB；设置与交易者标注保存在
@@ -65,11 +69,15 @@ Fomo 登录用户所关注交易者的实时动态。扩展会在本地保存可
 ```text
 Fomo page (MAIN world interceptor) --postMessage--> Fomo bridge (ISOLATED world)
   --> service worker (ingest: normalize -> insert -> broadcast -> enrich)
-  --> Chrome Side Panel (history, search, filters, annotations, diagnostics)
+  --> shared feed UI
+      |--> Chrome Side Panel
+      `--> activation host --user gesture--> always-on-top Document PiP
 ```
 
 service worker 是基于可注入模块的轻量组合入口。所有跨上下文消息都经过版本化、
 发送者校验的协议（`src/messaging/`），content scripts 不会运行在 `<all_urls>`。
+悬浮模式的扩展宿主只负责接收用户激活和承载 PiP 生命周期；真正置顶的信息流
+运行在 Document PiP 中，不使用原生助手、页面注入或普通弹窗伪装置顶。
 
 ### 支持范围与隐私边界
 
@@ -98,6 +106,7 @@ pnpm build      # production build -> .output/chrome-mv3
 - [后续版本路线图](ROADMAP.md)
 - [开发指南](docs/development.md)
 - [中文手工测试指南](docs/manual-testing.zh-CN.md)
+- [始终置顶悬浮窗验证矩阵](docs/testing/always-on-top-floating-window.md)
 - [隐私与数据处理说明](docs/privacy.md)
 - [设计规格](docs/superpowers/specs/2026-08-20-fomo-live-feed-extension-design.md)
 - [实施计划](docs/superpowers/plans/2026-08-20-fomo-live-feed-extension.md)
@@ -107,9 +116,10 @@ pnpm build      # production build -> .output/chrome-mv3
 ## English
 
 Fomo Live Feed is a Chrome extension that surfaces real-time activity from
-traders followed by the authenticated Fomo user in Chrome's Side Panel or a
-standalone floating window. It stores a searchable, filterable local history
-without injecting floating notification cards into trading pages.
+traders followed by the authenticated Fomo user in Chrome's Side Panel or an
+always-on-top Document Picture-in-Picture window. It stores a searchable,
+filterable local history without injecting floating notification cards into
+trading pages.
 
 > **MVP status:** The core implementation is covered by unit, integration, and
 > end-to-end tests. The production Fomo enrichment and REST backfill adapters
@@ -130,7 +140,10 @@ Assets → `Fomo-Live-Feed-v0.4.0-chrome.zip`**.
 3. Enable **Developer mode** in the top-right corner.
 4. Select **Load unpacked** and choose the extracted directory.
 5. Keep at least one authenticated Fomo page open; the extension automatically restores capture after an extension reload.
-6. Select the extension icon to open the feed; choose Side Panel or floating window in Settings.
+6. Select the extension icon to open the feed; choose Side Panel or floating mode in Settings.
+   On first entry, the compact activation host asks you to select **Keep floating
+   window on top**. The Document PiP opened by that gesture is the actual
+   always-on-top feed.
 
 Recipients do not need this repository, Node.js, or pnpm. `START-HERE.html` in
 the extracted directory contains startup and troubleshooting guidance. The
@@ -156,10 +169,13 @@ To verify the download, get
   events.
 - **Fomo navigation:** Select a token symbol to reuse an existing Fomo tab and
   open the verified chain-and-contract route. Unverifiable targets remain text.
-- **Seamless Side Panel / floating-window switching:** Both surfaces share the
-  background connection, history, filters, settings, and annotations. The
-  source closes only after the target is synchronized, so exactly one surface
-  remains visible. Capture is also restored automatically after extension reloads.
+- **Seamless Side Panel / always-on-top floating switching:** Both modes share
+  the background connection, history, filters, settings, and annotations. The
+  Side Panel first synchronizes a compact activation host; a direct user click
+  then opens Document PiP. After PiP is ready the host is minimized, leaving
+  exactly one interactive feed. PiP stays above Chrome tabs without consuming
+  page width, while atomic return, native-close recovery, and reload handling
+  prevent lost or duplicated feed state.
 - **Compact terminal UI:** Semantic borders distinguish buy, sell, thesis, and
   transfer events. Toolbar, filters, settings, empty states, and loading
   feedback share one light/dark visual system without reducing feed density.
@@ -181,12 +197,17 @@ To verify the download, get
 ```text
 Fomo page (MAIN world interceptor) --postMessage--> Fomo bridge (ISOLATED world)
   --> service worker (ingest: normalize -> insert -> broadcast -> enrich)
-  --> Chrome Side Panel (history, search, filters, annotations, diagnostics)
+  --> shared feed UI
+      |--> Chrome Side Panel
+      `--> activation host --user gesture--> always-on-top Document PiP
 ```
 
 The service worker is a thin composition root over injectable modules. Every
 cross-context message uses a versioned, sender-validated protocol
 (`src/messaging/`), and content scripts never run on `<all_urls>`.
+The floating host exists only to collect the required activation and coordinate
+the PiP lifecycle. The actual always-on-top feed runs in Document PiP; no native
+helper, page injection, or ordinary-popup fallback is used.
 
 ### Supported scope and privacy boundaries
 
@@ -220,6 +241,7 @@ archive. The ZIP and neighboring SHA-256 checksum are written to
 - [Roadmap](ROADMAP.md)
 - [Development guide](docs/development.md)
 - [Chinese manual testing guide](docs/manual-testing.zh-CN.md)
+- [Always-on-top floating verification matrix](docs/testing/always-on-top-floating-window.md)
 - [Privacy and data handling](docs/privacy.md)
 - [Design specification](docs/superpowers/specs/2026-08-20-fomo-live-feed-extension-design.md)
 - [Implementation plan](docs/superpowers/plans/2026-08-20-fomo-live-feed-extension.md)

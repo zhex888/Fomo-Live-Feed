@@ -54,7 +54,11 @@ import { SettingsPanel } from '../popup/SettingsPanel';
 import { useEventFeed } from '../popup/use-event-feed';
 import { PipelineDiagnostics } from './PipelineDiagnostics';
 import { SupportPanel } from './SupportPanel';
-import { createSurfaceSwitchClient } from './surface-switch-client';
+import {
+  createSurfaceSwitchClient,
+  type SurfaceSwitchClient,
+} from './surface-switch-client';
+import { useSurfaceReady } from './use-surface-ready';
 import {
   FILTERABLE_CHAINS,
   toMutedChains,
@@ -145,16 +149,30 @@ export interface SidePanelDependencies {
    * window restores it on the next open). Defaults to `sidepanel`, which
    * reports nothing.
    */
-  surface?: 'sidepanel' | 'floatpanel';
+  surface?: 'sidepanel' | 'floatpanel' | 'pip';
+  /**
+   * Whether this mounted feed owns read receipts. Defaults to true. The
+   * floating host disables ownership while its PiP child is mounted so the
+   * visually overlapping feeds cannot both mark the same row.
+   */
+  readEnabled?: boolean;
 }
 
-export function SidePanelApp(props: { deps: SidePanelDependencies }) {
-  const { deps } = props;
+export interface SidePanelAppProps {
+  deps: SidePanelDependencies;
+  surfaceSwitchClient?: SurfaceSwitchClient;
+  surfaceLifecycleEnabled?: boolean;
+  /** Reports the installed initial feed snapshot exactly once per mount. */
+  onFeedReady?: (eventWatermark: number) => void;
+}
+
+export function SidePanelApp(props: SidePanelAppProps) {
+  const { deps, onFeedReady } = props;
   const runtime = deps.runtime;
   const now = deps.now;
   const variant = deps.variant ?? 'sidepanel';
   const surface = deps.surface ?? 'sidepanel';
-  const surfaceKey: SurfaceKey = surface === 'floatpanel' ? 'floating' : 'sidepanel';
+  const surfaceKey: SurfaceKey = surface === 'sidepanel' ? 'sidepanel' : 'floating';
   const showFeedControls = variant === 'popup';
   const { translate } = useLocale();
 
@@ -166,8 +184,8 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
     [deps.preferences, deps.storage.local],
   );
   const surfaceSwitchClient = useMemo(
-    () => createSurfaceSwitchClient(runtime),
-    [runtime],
+    () => props.surfaceSwitchClient ?? createSurfaceSwitchClient(runtime, now),
+    [now, props.surfaceSwitchClient, runtime],
   );
   const [surfaceSwitchState, setSurfaceSwitchState] = useState<
     'idle' | 'switching' | 'error'
@@ -589,82 +607,53 @@ export function SidePanelApp(props: { deps: SidePanelDependencies }) {
       // BLOCKING 1: only a CONNECTED side panel/popup may mark rendered rows
       // read. In the offline / login-required / reconnecting states the same
       // rows render READ-ONLY below the banner and nothing is ever marked read.
-      readEnabled: connectionState === 'connected',
+      readEnabled: connectionState === 'connected' && (deps.readEnabled ?? true),
     },
   );
+
+  const feedEventsRef = useRef(feed.events);
+  feedEventsRef.current = feed.events;
+  const didReportFeedReadyRef = useRef(false);
+  useEffect(() => {
+    if (
+      feed.status !== 'ready'
+      || onFeedReady === undefined
+      || didReportFeedReadyRef.current
+    ) {
+      return;
+    }
+
+    // useEventFeed installs its displayed snapshot in an effect after the
+    // query resolves. Defer one task so the callback observes that committed
+    // snapshot rather than the preceding loading render.
+    const timer = setTimeout(() => {
+      if (didReportFeedReadyRef.current) return;
+      didReportFeedReadyRef.current = true;
+      onFeedReady(feedEventsRef.current.reduce(
+        (latest, event) => Math.max(latest, event.occurredAt),
+        0,
+      ));
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [feed.status, onFeedReady]);
 
   // The coordinator opens a new target surface. It acknowledges the active
   // transaction only after the initial history snapshot and live listener
   // are ready; the source remains visible until this completes.
-  useEffect(() => {
-    if (feed.status !== 'ready') return;
-
-    let disposed = false;
-    let readySwitchId: string | undefined;
-    let bootstrapInFlight = false;
-    let bootstrapPollsRemaining = 50;
-    let bootstrapTimer: ReturnType<typeof setTimeout> | undefined;
-    const scheduleBootstrapPoll = (): void => {
-      if (disposed || readySwitchId !== undefined || bootstrapPollsRemaining <= 0) return;
-      bootstrapPollsRemaining -= 1;
-      clearTimeout(bootstrapTimer);
-      bootstrapTimer = setTimeout(() => void check(), 200);
-    };
-    const check = async (): Promise<void> => {
-      if (disposed || bootstrapInFlight || readySwitchId !== undefined) return;
-      bootstrapInFlight = true;
-      try {
-        const windowId = await (deps.getCurrentWindowId?.() ?? Promise.resolve(0));
-        const bootstrap = await surfaceSwitchClient.bootstrap(surfaceKey, windowId);
-        const transaction = bootstrap.transaction;
-        if (
-          disposed
-          || (transaction !== undefined && transaction.switchId === readySwitchId)
-        ) return;
-        if (transaction === undefined) {
-          return;
-        }
-        if (transaction.phase !== 'awaiting-ready') {
-          scheduleBootstrapPoll();
-          return;
-        }
-        const eventWatermark = feed.events.reduce(
-          (latest, event) => Math.max(latest, event.occurredAt),
-          0,
-        );
-        const result = await surfaceSwitchClient.ready(
-          transaction.switchId,
-          surfaceKey,
-          eventWatermark,
-        );
-        if (result.ok) {
-          readySwitchId = transaction.switchId;
-        } else {
-          scheduleBootstrapPoll();
-        }
-      } catch {
-        scheduleBootstrapPoll();
-      } finally {
-        bootstrapInFlight = false;
-      }
-    };
-
-    const onSwitchMessage = (message: unknown): void => {
-      const parsed = parseExtensionMessage(message);
-      if (
-        parsed.ok
-        && parsed.message.type === 'surface.switch.started'
-        && parsed.message.payload.target === surfaceKey
-      ) void check();
-    };
-    runtime.onMessage.addListener(onSwitchMessage);
-    void check();
-    return () => {
-      disposed = true;
-      clearTimeout(bootstrapTimer);
-      runtime.onMessage.removeListener(onSwitchMessage);
-    };
-  }, [deps.getCurrentWindowId, feed.events, feed.status, runtime, surfaceKey, surfaceSwitchClient]);
+  const eventWatermark = feed.events.reduce(
+    (latest, event) => Math.max(latest, event.occurredAt),
+    0,
+  );
+  useSurfaceReady({
+    enabled: feed.status === 'ready' && props.surfaceLifecycleEnabled !== false,
+    runtime,
+    getCurrentWindowId: deps.getCurrentWindowId,
+    surface: surfaceKey,
+    eventWatermark,
+    now,
+    client: surfaceSwitchClient,
+  });
 
   const upsertAnnotation = useCallback(
     (traderId: string, update: TraderAnnotationUpdate): void => {

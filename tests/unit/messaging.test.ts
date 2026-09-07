@@ -6,6 +6,7 @@ import {
   extensionMessageSchema,
   MAX_QUERY_LIMIT,
   parseExtensionMessage,
+  PIP_CLOSE_REASONS,
   PROTOCOL_VERSION,
   WINDOW_MESSAGE_NAMESPACE,
 } from '../../src/messaging/protocol';
@@ -13,6 +14,7 @@ import type { ProtocolRejectionCode } from '../../src/messaging/protocol';
 import {
   FOMO_ORIGINS,
   isAllowedFomoOrigin,
+  isTrustedFloatHostSender,
   isTrustedFomoSender,
   isTrustedFomoWindowMessage,
   isTrustedPopupSender,
@@ -522,12 +524,13 @@ describe('protocol', () => {
             source: 'sidepanel',
             target: 'floating',
             sourceWindowId: 7,
+            instanceToken: 'panel-instance',
           },
         },
         {
           protocolVersion: 1,
           type: 'surface.bootstrap',
-          payload: { surface: 'floating', windowId: 8 },
+          payload: { surface: 'floating', windowId: 8, instanceToken: 'float-instance' },
         },
         {
           protocolVersion: 1,
@@ -536,6 +539,8 @@ describe('protocol', () => {
             switchId: 'switch-1',
             surface: 'floating',
             eventWatermark: 12,
+            windowId: 8,
+            instanceToken: 'float-instance',
           },
         },
       ];
@@ -585,6 +590,142 @@ describe('protocol', () => {
 
       for (const message of messages) {
         expect(parseExtensionMessage(message).ok).toBe(false);
+      }
+    });
+
+    it('accepts strict Document PiP lifecycle messages', () => {
+      const messages = [
+        {
+          protocolVersion: 1,
+          type: 'pip.opened',
+          payload: { sessionId: 'pip-session-1', hostWindowId: 500 },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.ready',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            eventWatermark: 1_800_000_000_000,
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.closed',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            reason: 'native-close',
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.returnToSidePanel',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            ownerWindowId: 77,
+            switchId: 'switch-1',
+          },
+        },
+      ];
+
+      for (const message of messages) {
+        expect(parseExtensionMessage(message)).toMatchObject({ ok: true });
+      }
+    });
+
+    it('exports and accepts the closed set of Document PiP close reasons', () => {
+      expect(PIP_CLOSE_REASONS).toEqual([
+        'native-close',
+        'return-to-sidepanel',
+        'mount-failed',
+      ]);
+
+      for (const reason of PIP_CLOSE_REASONS) {
+        expect(parseExtensionMessage({
+          protocolVersion: 1,
+          type: 'pip.closed',
+          payload: { sessionId: 'pip-session-1', hostWindowId: 500, reason },
+        })).toMatchObject({ ok: true });
+      }
+    });
+
+    it('rejects invalid Document PiP lifecycle payloads', () => {
+      const messages = [
+        {
+          protocolVersion: 1,
+          type: 'pip.opened',
+          payload: { sessionId: '', hostWindowId: 500 },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.opened',
+          payload: { sessionId: 'x'.repeat(129), hostWindowId: 500 },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.ready',
+          payload: { sessionId: 'pip-session-1', hostWindowId: -1, eventWatermark: 1 },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.closed',
+          payload: { sessionId: 'pip-session-1', hostWindowId: 500, reason: 'unknown' },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.closed',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            reason: 'native-close',
+            extra: true,
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.returnToSidePanel',
+          payload: { sessionId: 'pip-session-1', hostWindowId: 500, switchId: 'switch-1' },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.returnToSidePanel',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            ownerWindowId: 77,
+            switchId: 'x'.repeat(129),
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.returnToSidePanel',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            ownerWindowId: -1,
+            switchId: 'switch-1',
+          },
+        },
+        {
+          protocolVersion: 1,
+          type: 'pip.returnToSidePanel',
+          payload: {
+            sessionId: 'pip-session-1',
+            hostWindowId: 500,
+            ownerWindowId: 77,
+            switchId: 'switch-1',
+            extra: true,
+          },
+        },
+      ];
+
+      for (const message of messages) {
+        expect(parseExtensionMessage(message)).toEqual({
+          ok: false,
+          reason: 'invalid-payload',
+        });
       }
     });
 
@@ -872,6 +1013,13 @@ describe('guards', () => {
       expect(trustClassForMessageType('surface.ready')).toBe('privileged-ui-page');
     });
 
+    it.each(['pip.opened', 'pip.ready', 'pip.closed', 'pip.returnToSidePanel'])(
+      'requires the privileged UI class for %s',
+      (messageType) => {
+        expect(trustClassForMessageType(messageType)).toBe('privileged-ui-page');
+      },
+    );
+
     it('requires the privileged UI class for sync.request/sync.query and none for sync.changed (Task 5 Step 5)', () => {
       expect(trustClassForMessageType('sync.request')).toBe('privileged-ui-page');
       expect(trustClassForMessageType('sync.query')).toBe('privileged-ui-page');
@@ -963,6 +1111,49 @@ describe('guards', () => {
     });
   });
 
+  describe('isTrustedFloatHostSender', () => {
+    const EXTENSION_ID = 'our-extension-id';
+    const FLOAT_URL = `chrome-extension://${EXTENSION_ID}/floatpanel.html?mode=pip#feed`;
+
+    it('binds an exact float page sender to the Chrome host window id', () => {
+      expect(isTrustedFloatHostSender({
+        id: EXTENSION_ID,
+        url: FLOAT_URL,
+        tab: { id: 12, windowId: 900, url: FLOAT_URL },
+      }, EXTENSION_ID, 900)).toBe(true);
+    });
+
+    it.each([
+      ['tabless popup', { id: EXTENSION_ID }],
+      ['side panel', {
+        id: EXTENSION_ID,
+        url: `chrome-extension://${EXTENSION_ID}/sidepanel.html`,
+        tab: {
+          id: 12,
+          windowId: 900,
+          url: `chrome-extension://${EXTENSION_ID}/sidepanel.html`,
+        },
+      }],
+      ['wrong window', {
+        id: EXTENSION_ID,
+        url: FLOAT_URL,
+        tab: { id: 900, windowId: 901, url: FLOAT_URL },
+      }],
+      ['tab id confusion', {
+        id: EXTENSION_ID,
+        url: FLOAT_URL,
+        tab: { id: 900, windowId: 12, url: FLOAT_URL },
+      }],
+      ['other extension', {
+        id: 'other-extension',
+        url: FLOAT_URL,
+        tab: { id: 12, windowId: 900, url: FLOAT_URL },
+      }],
+    ])('rejects %s', (_label, sender) => {
+      expect(isTrustedFloatHostSender(sender, EXTENSION_ID, 900)).toBe(false);
+    });
+  });
+
   describe('isTrustedSenderForMessage matrix', () => {
     const EXTENSION_ID = 'our-extension-id';
     const SENDER_BY_KIND: Readonly<Record<string, MessageSenderLike | null>> = {
@@ -976,6 +1167,36 @@ describe('guards', () => {
       'other extension': { id: 'other-extension' },
       'no sender': null,
     };
+
+    it.each(['pip.opened', 'pip.ready', 'pip.closed', 'pip.returnToSidePanel'])(
+      'accepts %s only from a privileged extension page',
+      (messageType) => {
+        const extensionPageUrl =
+          'chrome-extension://' + EXTENSION_ID + '/popup/index.html';
+
+        expect(
+          isTrustedSenderForMessage(
+            { id: EXTENSION_ID, url: extensionPageUrl, tab: { url: extensionPageUrl } },
+            messageType,
+            EXTENSION_ID,
+          ),
+        ).toBe(true);
+        expect(
+          isTrustedSenderForMessage(
+            { id: EXTENSION_ID, url: extensionPageUrl, tab: { url: 'https://evil.test/' } },
+            messageType,
+            EXTENSION_ID,
+          ),
+        ).toBe(false);
+        expect(
+          isTrustedSenderForMessage(
+            { id: EXTENSION_ID, tab: { url: 'https://fomo.family/' } },
+            messageType,
+            EXTENSION_ID,
+          ),
+        ).toBe(false);
+      },
+    );
 
     it.each([
       ['activity.ingest', 'fomo tab', true],

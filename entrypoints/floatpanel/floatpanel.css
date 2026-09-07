@@ -23,3 +23,147 @@ body {
 .sidepanel-root {
   min-width: 320px;
 }
+
+.floating-surface-host,
+.pip-feed-root {
+  --ui-canvas: #090d13;
+  --ui-raised: #0d131c;
+  --ui-control: #121a25;
+  --ui-text: #f3f7ff;
+  --ui-text-muted: #8997aa;
+  --ui-rule: #202b39;
+  --event-buy: #31d399;
+  --event-sell: #f16d79;
+  --event-thesis: #7ea7ff;
+}
+
+.floating-surface-host[data-theme='light'],
+.pip-feed-root[data-theme='light'] {
+  --ui-canvas: #f4f6f9;
+  --ui-raised: #ffffff;
+  --ui-control: #eef2f6;
+  --ui-text: #121923;
+  --ui-text-muted: #5d697a;
+  --ui-rule: #d8dee7;
+  --event-buy: #087f5b;
+  --event-sell: #c92a3a;
+  --event-thesis: #315fbd;
+}
+
+.floating-surface-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  color: var(--ui-text, #f3f7ff);
+  background: var(--ui-canvas, #090d13);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.floating-host-card {
+  position: absolute;
+  inset: auto 12px 12px;
+  z-index: 10;
+  padding: 12px;
+  border: 1px solid var(--ui-rule, #202b39);
+  border-radius: 10px;
+  background: var(--ui-raised, #0d131c);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+}
+
+.floating-host-card--standalone {
+  inset: 50% 20px auto;
+  transform: translateY(-50%);
+}
+
+.floating-host-card h1,
+.floating-host-card p {
+  margin: 0 0 10px;
+}
+
+.floating-host-actions,
+.pip-lifecycle-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.floating-host-card button,
+.pip-lifecycle-bar button {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--ui-rule, #202b39);
+  border-radius: 7px;
+  color: var(--ui-text, #f3f7ff);
+  background: var(--ui-control, #121a25);
+  cursor: pointer;
+}
+
+.floating-primary-action {
+  border-color: var(--event-thesis, #7ea7ff) !important;
+}
+
+.floating-host-card button:focus-visible,
+.pip-lifecycle-bar button:focus-visible {
+  outline: 2px solid var(--event-thesis, #7ea7ff);
+  outline-offset: 2px;
+}
+
+.floating-host-card button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.floating-lifecycle-shell {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  padding: 16px;
+  color: var(--ui-text-muted, #8997aa);
+  text-align: center;
+}
+
+.pip-feed-root {
+  display: flex;
+  width: 100%;
+  height: 100vh;
+  flex-direction: column;
+}
+
+.pip-feed-root > .sidepanel-root {
+  min-height: 0;
+  flex: 1;
+}
+
+.pip-lifecycle-bar {
+  min-height: 36px;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--ui-rule, #202b39);
+  background: var(--ui-raised, #0d131c);
+  color: var(--ui-text, #f3f7ff);
+  font: 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.pip-lifecycle-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pip-lifecycle-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--event-buy, #31d399);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
